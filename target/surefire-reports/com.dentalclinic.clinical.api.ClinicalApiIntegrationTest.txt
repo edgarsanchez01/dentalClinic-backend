@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: com.dentalclinic.clinical.api.ClinicalApiIntegrationTest
+-------------------------------------------------------------------------------
+Tests run: 7, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 2.420 s -- in com.dentalclinic.clinical.api.ClinicalApiIntegrationTest

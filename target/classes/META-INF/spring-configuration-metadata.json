@@ -1,0 +1,147 @@
+{
+  "groups": [
+    {
+      "name": "dentalclinic.fixtures",
+      "type": "com.dentalclinic.foundation.FixturesProperties",
+      "sourceType": "com.dentalclinic.foundation.FixturesProperties"
+    },
+    {
+      "name": "dentalclinic.security",
+      "type": "com.dentalclinic.identity.infrastructure.security.SecurityProperties",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties"
+    },
+    {
+      "name": "dentalclinic.security.cors",
+      "type": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$Cors",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties",
+      "sourceMethod": "cors()"
+    },
+    {
+      "name": "dentalclinic.security.invitation",
+      "type": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$OneTimeToken",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties",
+      "sourceMethod": "invitation()"
+    },
+    {
+      "name": "dentalclinic.security.jwt",
+      "type": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$Jwt",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties",
+      "sourceMethod": "jwt()"
+    },
+    {
+      "name": "dentalclinic.security.password-reset",
+      "type": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$OneTimeToken",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties",
+      "sourceMethod": "passwordReset()"
+    },
+    {
+      "name": "dentalclinic.security.refresh",
+      "type": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$Refresh",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties",
+      "sourceMethod": "refresh()"
+    },
+    {
+      "name": "dentalclinic.security.refresh-cookie",
+      "type": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$RefreshCookie",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties",
+      "sourceMethod": "refreshCookie()"
+    }
+  ],
+  "properties": [
+    {
+      "name": "dentalclinic.fixtures.allowed-profiles",
+      "type": "java.util.Set<java.lang.String>",
+      "description": "perfiles de Spring autorizados a sembrar",
+      "sourceType": "com.dentalclinic.foundation.FixturesProperties"
+    },
+    {
+      "name": "dentalclinic.fixtures.enabled",
+      "type": "java.lang.Boolean",
+      "description": "bandera explicita de entorno (segunda barrera)",
+      "sourceType": "com.dentalclinic.foundation.FixturesProperties",
+      "defaultValue": false
+    },
+    {
+      "name": "dentalclinic.fixtures.expected-database",
+      "type": "java.lang.String",
+      "description": "nombre de base de datos que debe coincidir",
+      "sourceType": "com.dentalclinic.foundation.FixturesProperties"
+    },
+    {
+      "name": "dentalclinic.fixtures.forbidden-databases",
+      "type": "java.util.Set<java.lang.String>",
+      "description": "nombres de base que nunca se pueden sembrar",
+      "sourceType": "com.dentalclinic.foundation.FixturesProperties"
+    },
+    {
+      "name": "dentalclinic.fixtures.require-empty-database",
+      "type": "java.lang.Boolean",
+      "description": "si true, la base debe estar vacia de tablas de negocio",
+      "sourceType": "com.dentalclinic.foundation.FixturesProperties",
+      "defaultValue": false
+    },
+    {
+      "name": "dentalclinic.security.cors.allowed-origins",
+      "type": "java.util.List<java.lang.String>",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$Cors"
+    },
+    {
+      "name": "dentalclinic.security.invitation.ttl",
+      "type": "java.time.Duration",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$OneTimeToken"
+    },
+    {
+      "name": "dentalclinic.security.jwt.access-token-ttl",
+      "type": "java.time.Duration",
+      "description": "15 minutos. Valor <strong>normativo<\/strong> (§7.1).",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$Jwt"
+    },
+    {
+      "name": "dentalclinic.security.jwt.issuer",
+      "type": "java.lang.String",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$Jwt"
+    },
+    {
+      "name": "dentalclinic.security.jwt.secret",
+      "type": "java.lang.String",
+      "description": "clave simétrica de firma. HS256 de jjwt exige al menos 256 bits; se valida con 32 caracteres para que un valor débil no pase inadvertido.",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$Jwt"
+    },
+    {
+      "name": "dentalclinic.security.password-reset.ttl",
+      "type": "java.time.Duration",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$OneTimeToken"
+    },
+    {
+      "name": "dentalclinic.security.refresh-cookie.name",
+      "type": "java.lang.String",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$RefreshCookie"
+    },
+    {
+      "name": "dentalclinic.security.refresh-cookie.path",
+      "type": "java.lang.String",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$RefreshCookie"
+    },
+    {
+      "name": "dentalclinic.security.refresh-cookie.same-site",
+      "type": "java.lang.String",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$RefreshCookie"
+    },
+    {
+      "name": "dentalclinic.security.refresh-cookie.secure",
+      "type": "java.lang.Boolean",
+      "description": "el único atributo con variante por entorno: en producción es siempre {@code true}. Solo se permite desactivarlo en dev y test, donde el transporte es HTTP sin TLS y un navegador descartaría la cookie.",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$RefreshCookie",
+      "defaultValue": false
+    },
+    {
+      "name": "dentalclinic.security.refresh.ttl",
+      "type": "java.time.Duration",
+      "sourceType": "com.dentalclinic.identity.infrastructure.security.SecurityProperties$Refresh"
+    }
+  ],
+  "hints": [],
+  "ignored": {
+    "properties": []
+  }
+}

@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: com.dentalclinic.appointment.integration.AppointmentLifecycleApiTest
+-------------------------------------------------------------------------------
+Tests run: 8, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 4.136 s -- in com.dentalclinic.appointment.integration.AppointmentLifecycleApiTest
