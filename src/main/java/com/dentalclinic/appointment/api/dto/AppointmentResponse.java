@@ -3,6 +3,7 @@ package com.dentalclinic.appointment.api.dto;
 import java.time.Instant;
 
 import com.dentalclinic.appointment.domain.AppointmentStatus;
+import com.dentalclinic.identity.domain.Role;
 
 /**
  * Representación de una cita para la agenda. Incluye los nombres del paciente y del dentista (que
@@ -28,4 +29,15 @@ public record AppointmentResponse(
         Instant completedAt,
         Instant createdAt,
         Instant updatedAt) {
+
+    /** PRD §11.5: las notas internas nunca forman parte de la respuesta PATIENT. */
+    public AppointmentResponse forRole(Role role) {
+        return switch (role) {
+            case OWNER, DENTIST, RECEPTIONIST -> this;
+            case PATIENT -> new AppointmentResponse(id, patientId, patientFirstName,
+                    patientLastName, patientUserId, dentistId, dentistFirstName, dentistLastName,
+                    startAt, endAt, durationMinutes, status, occurrenceVersion, createdByUserId,
+                    reason, null, completedAt, createdAt, updatedAt);
+        };
+    }
 }

@@ -136,7 +136,7 @@ public class AppointmentService {
                 appointment.getOccurrenceVersion(), null);
         appointmentEventRepository.save(event);
 
-        AppointmentResponse response = toResponse(appointment, patient, dentist);
+        AppointmentResponse response = toResponse(appointment, patient, dentist, actor);
         Map<String, Object> body = objectMapper.convertValue(response, new TypeReference<>() {
         });
         httpIdempotencyRepository.save(HttpIdempotency.create(actor.userId(), CREATE_OPERATION,
@@ -240,7 +240,7 @@ public class AppointmentService {
                 AppointmentEventType.APPOINTMENT_RESCHEDULED, actor.userId(),
                 appointment.getOccurrenceVersion(), null));
         communications.rescheduled(appointment, patient, dentist, actor.userId(), zone, now);
-        return toResponse(appointment, patient, dentist);
+        return toResponse(appointment, patient, dentist, actor);
     }
 
     @Transactional
@@ -265,7 +265,7 @@ public class AppointmentService {
                 appointment.getOccurrenceVersion(), null));
         communications.cancelled(appointment, patient, dentist, actor.userId(),
                 ZoneId.of(clinic.getTimezone()));
-        return toResponse(appointment, patient, dentist);
+        return toResponse(appointment, patient, dentist, actor);
     }
 
     @Transactional
@@ -284,7 +284,7 @@ public class AppointmentService {
         communications.notifyPatientInApp(appointment, patient, "Consulta completada",
                 "Gracias por tu visita. Registramos tu consulta como completada.");
         Dentist dentist = dentistService.get(appointment.getDentistId());
-        return toResponse(appointment, patient, dentist);
+        return toResponse(appointment, patient, dentist, actor);
     }
 
     /** No-show: solo OWNER|RECEPTIONIST (matriz §17.5) y solo desde que la cita ya comenzó (A-18). */
@@ -312,7 +312,7 @@ public class AppointmentService {
         communications.notifyPatientInApp(appointment, patient, "Cita no realizada",
                 "No registramos tu asistencia a la cita del " + fecha + ". Si tienes dudas, contáctanos.");
         Dentist dentist = dentistService.get(appointment.getDentistId());
-        return toResponse(appointment, patient, dentist);
+        return toResponse(appointment, patient, dentist, actor);
     }
 
     /**
@@ -358,13 +358,13 @@ public class AppointmentService {
     }
 
     @Transactional(readOnly = true)
-    public AppointmentResponse view(Appointment appointment) {
+    public AppointmentResponse view(Appointment appointment, AuthenticatedUser actor) {
         return toResponse(appointment, patientService.get(appointment.getPatientId()),
-                dentistService.get(appointment.getDentistId()));
+                dentistService.get(appointment.getDentistId()), actor);
     }
 
     @Transactional(readOnly = true)
-    public List<AppointmentResponse> views(List<Appointment> appointments) {
+    public List<AppointmentResponse> views(List<Appointment> appointments, AuthenticatedUser actor) {
         if (appointments.isEmpty()) {
             return List.of();
         }
@@ -374,7 +374,7 @@ public class AppointmentService {
                 appointments.stream().map(Appointment::getDentistId).toList());
         return appointments.stream()
                 .map(a -> toResponse(a, patients.get(a.getPatientId()),
-                        dentists.get(a.getDentistId())))
+                        dentists.get(a.getDentistId()), actor))
                 .toList();
     }
 
@@ -510,12 +510,14 @@ public class AppointmentService {
         return FECHA_HORA.format(instant.atZone(zone));
     }
 
-    private static AppointmentResponse toResponse(Appointment a, Patient patient, Dentist dentist) {
+    private static AppointmentResponse toResponse(Appointment a, Patient patient, Dentist dentist,
+                                                   AuthenticatedUser actor) {
         return new AppointmentResponse(a.getId(), a.getPatientId(), patient.getFirstName(),
                 patient.getLastName(), patient.getUserId(), a.getDentistId(), dentist.getFirstName(),
                 dentist.getLastName(), a.getStartAt(), a.getEndAt(), a.getDurationMinutes(),
                 a.getStatus(), a.getOccurrenceVersion(), a.getCreatedByUserId(), a.getReason(),
-                a.getNotes(), a.getCompletedAt(), a.getCreatedAt(), a.getUpdatedAt());
+                a.getNotes(), a.getCompletedAt(), a.getCreatedAt(), a.getUpdatedAt())
+                .forRole(actor.role());
     }
 
     private static AppointmentEventView toEventView(AppointmentEvent event) {

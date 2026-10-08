@@ -74,7 +74,7 @@ public class AppointmentCreateCoordinator {
                 .findByIdentity(actor.userId(), OPERATION, idempotencyKey)
                 .orElse(null);
         if (existing != null) {
-            return replayOrConflict(existing, hash);
+            return replayOrConflict(existing, hash, actor);
         }
         try {
             return appointmentService.create(toData(request), actor, idempotencyKey, hash)
@@ -84,7 +84,7 @@ public class AppointmentCreateCoordinator {
                     .findByIdentity(actor.userId(), OPERATION, idempotencyKey)
                     .orElse(null);
             if (winner != null) {
-                return replayOrConflict(winner, hash);
+                return replayOrConflict(winner, hash, actor);
             }
             if (ex instanceof ScheduleConflictException conflict) {
                 // El ganador puede haber confirmado entre la lectura de clave y assertBookable.
@@ -96,12 +96,15 @@ public class AppointmentCreateCoordinator {
         }
     }
 
-    private AppointmentResponse replayOrConflict(HttpIdempotency existing, String hash) {
+    private AppointmentResponse replayOrConflict(HttpIdempotency existing, String hash,
+                                                 AuthenticatedUser actor) {
         if (!existing.getRequestHash().equals(hash)) {
             throw new ScheduleConflictException(
                     "La cabecera Idempotency-Key ya fue usada por otra petición con distinto contenido.");
         }
-        return objectMapper.convertValue(existing.getResponseBody(), AppointmentResponse.class);
+        // Tambien filtra respuestas almacenadas antes de la correccion de H-A12.
+        return objectMapper.convertValue(existing.getResponseBody(), AppointmentResponse.class)
+                .forRole(actor.role());
     }
 
     private String requestHash(CreateAppointmentRequest request) {

@@ -85,16 +85,18 @@ public class AppointmentController {
         int safeSize = Math.min(Math.max(size, 1), MAX_PAGE_SIZE);
         PageRequest pageable = PageRequest.of(safePage, safeSize,
                 Sort.by(Sort.Order.asc("startAt")));
+        AuthenticatedUser actor = CurrentUser.require();
         Page<Appointment> result = appointmentService.list(dentistId, patientId, status, from, to,
-                CurrentUser.require(), pageable);
-        return new PageResponse<>(appointmentService.views(result.getContent()),
+                actor, pageable);
+        return new PageResponse<>(appointmentService.views(result.getContent(), actor),
                 result.getNumber(), result.getSize(), result.getTotalElements(),
                 result.getTotalPages());
     }
 
     @GetMapping("/{id}")
     public AppointmentResponse get(@PathVariable("id") Long id) {
-        return appointmentService.view(appointmentService.get(id, CurrentUser.require()));
+        AuthenticatedUser actor = CurrentUser.require();
+        return appointmentService.view(appointmentService.get(id, actor), actor);
     }
 
     /** Auditoría append-only de la cita (RF-AP-05/15), misma visibilidad que la cita. */
