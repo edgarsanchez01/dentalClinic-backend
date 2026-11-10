@@ -99,7 +99,9 @@ public class EndpointAccessFilter extends OncePerRequestFilter {
         if (!path.startsWith(API_PREFIX)
                 || path.startsWith(AUTH_PREFIX)
                 || path.startsWith(ONBOARDING_PREFIX)
-                || path.equals(PUBLIC_SCHEDULE_PATH)) {
+                || path.equals(PUBLIC_SCHEDULE_PATH)
+                || SecurityConfig.PUBLIC_SERVICES_READ.matches(request)
+                || SecurityConfig.PUBLIC_FEEDBACK.matches(request)) {
             return true;
         }
         return accessPolicy.decide(path, request.getMethod(), principal.role())

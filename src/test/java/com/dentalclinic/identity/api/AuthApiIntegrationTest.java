@@ -166,6 +166,28 @@ class AuthApiIntegrationTest extends IdentityIntegrationTestSupport {
                 .andExpect(jsonPath("$.fieldErrors.password").exists());
     }
 
+    // ------------------------------------------------------------------ resend (dev-only)
+
+    /**
+     * El reenvío de invitaciones es una herramienta de desarrollo ({@code @Profile("dev")}): en
+     * cualquier otro perfil la ruta no existe, así que no puede filtrarse en producción. Un OWNER
+     * autenticado recibe 404.
+     */
+    @Test
+    void reenviarInvitacion_NoExisteFueraDelPerfilDev_404() throws Exception {
+        String owner = seedUser("duena", Role.OWNER, true, PASSWORD);
+        String accessToken = loginAccessToken(owner);
+        User pendiente = seed("recep-pend", Role.RECEPTIONIST, false, PASSWORD);
+        invitationRepository.saveAndFlush(Invitation.issueForExistingUser(
+                tokenHasher.hash("invite-resend"), pendiente.getEmail(), Role.RECEPTIONIST,
+                pendiente.getId(), TestTime.now().plus(properties.invitation().ttl())));
+
+        mockMvc.perform(post("/api/users/{id}/invitations/resend", pendiente.getId())
+                        .header("Authorization", "Bearer " + accessToken))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404));
+    }
+
     // ------------------------------------------------------------------ /me
 
     @Test

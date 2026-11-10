@@ -6,6 +6,11 @@ import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
 
+import jakarta.validation.Validator;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+
 import org.springframework.stereotype.Service;
 
 import com.dentalclinic.appointment.domain.Appointment;
@@ -23,6 +28,7 @@ import com.dentalclinic.appointment.infrastructure.repository.CommunicationInten
 import com.dentalclinic.appointment.infrastructure.repository.CommunicationRepository;
 import com.dentalclinic.appointment.infrastructure.repository.NotificationRepository;
 import com.dentalclinic.clinic.domain.Dentist;
+import com.dentalclinic.clinic.domain.Clinic;
 import com.dentalclinic.identity.application.UserService;
 import com.dentalclinic.patient.domain.Patient;
 
@@ -34,10 +40,11 @@ import com.dentalclinic.patient.domain.Patient;
  * se envía: el dispatcher es de F8 y la deduplicación in-app recae en la intención.
  *
  * <p><strong>Qué NO hace este planificador (Frontera F6↔F8):</strong> no abre SMTP, no reintenta,
- * no cambia estados de comunicación, no genera recordatorios ni feedback. Tampoco bloquea la cita
+ * no cambia estados de comunicación ni genera feedback. T4.1 materializa recordatorios sin envío.
+ * Tampoco bloquea la cita
  * por no encontrar canal: se registra {@code NO_CONTACT_CHANNEL} (D-F6-01) y la cita sigue.
  *
- * <p>Los avisos de completado/no-show/llegada/comienzo se insertan directo en {@code Notification}
+ * <p>Los avisos de completado/no-show se insertan directo en {@code Notification}
  * sin fila de intención: {@code communication_intention.event_type} solo admite
  * CREATED/RESCHEDULED/CANCELLED/REMINDER (CHECK {@code ci_event_check}).
  */
@@ -52,14 +59,59 @@ public class AppointmentCommunicationPlanner {
     private final NotificationRepository notificationRepository;
     private final CommunicationIntentionRepository intentionRepository;
     private final UserService userService;
+    private final Validator validator;
+    private final com.dentalclinic.appointment.infrastructure.repository.AppointmentEventRepository events;
+    private final com.dentalclinic.patient.application.PatientService patients;
 
     public AppointmentCommunicationPlanner(CommunicationRepository communicationRepository,
             NotificationRepository notificationRepository,
-            CommunicationIntentionRepository intentionRepository, UserService userService) {
+            CommunicationIntentionRepository intentionRepository, UserService userService,
+            Validator validator,
+            com.dentalclinic.appointment.infrastructure.repository.AppointmentEventRepository events,
+            com.dentalclinic.patient.application.PatientService patients) {
         this.communicationRepository = communicationRepository;
         this.notificationRepository = notificationRepository;
         this.intentionRepository = intentionRepository;
         this.userService = userService;
+        this.validator = validator;
+        this.events = events;
+        this.patients = patients;
+    }
+
+    /** Fase 5C: una solicitud EMAIL; si falta contacto se registra la intención sin bloquear el cierre. */
+    public void feedbackRequested(ConsultationCompleted event) {
+        Patient patient = patients.get(event.patientId());
+        ParticipantIdentity identity = identityOf(patient);
+        String userEmail = validReminderEmail(identity.userEmail());
+        String patientEmail = validReminderEmail(identity.patientEmail());
+        String address = userEmail != null ? userEmail : patientEmail;
+        RecipientKind kind = userEmail != null ? RecipientKind.USER : RecipientKind.PATIENT;
+        if (address == null) {
+            intentionRepository.save(CommunicationIntention.noContact(event.appointmentId(),
+                    CommunicationType.FEEDBACK_REQUESTED, event.occurrenceVersion(), Channel.EMAIL,
+                    RequiredRole.PATIENT, PartyKind.PATIENT, patient.getId()));
+        } else {
+            Long uid = kind == RecipientKind.USER ? identity.userId() : null;
+            Long pid = kind == RecipientKind.PATIENT ? patient.getId() : null;
+            String key = "APPOINTMENT:" + event.appointmentId() + ":FEEDBACK_REQUESTED:EMAIL:"
+                    + (uid == null ? patient.getId() : "U" + uid);
+            var communication = communicationRepository.save(Communication.create(event.appointmentId(),
+                    CommunicationType.FEEDBACK_REQUESTED, kind, pid, uid, address, key, event.occurrenceVersion()));
+            intentionRepository.save(CommunicationIntention.deliverableEmail(event.appointmentId(),
+                    CommunicationType.FEEDBACK_REQUESTED, event.occurrenceVersion(), RequiredRole.PATIENT,
+                    PartyKind.PATIENT, patient.getId(), kind, uid, address, communication.getId()));
+        }
+        events.save(com.dentalclinic.appointment.domain.AppointmentEvent.create(event.appointmentId(),
+                com.dentalclinic.appointment.domain.AppointmentEventType.FEEDBACK_REQUESTED,
+                event.actorUserId(), event.occurrenceVersion(), null));
+    }
+
+    /** REMINDER: solo paciente, EMAIL+IN_APP; el llamador controla transacción y deduplicación. */
+    public void reminder(Appointment appointment, Patient patient, Clinic clinic, Dentist dentist) {
+        participant(appointment, CommunicationType.REMINDER, appointment.getOccurrenceVersion(),
+                RequiredRole.PATIENT, PartyKind.PATIENT, patient.getId(), identityOf(patient),
+                List.of(Channel.EMAIL, Channel.IN_APP), "Recordatorio de tu cita",
+                ReminderMessageContent.notificationBody(appointment, clinic, dentist));
     }
 
     /** CREATED (v1): paciente EMAIL+IN_APP; dentista solo IN_APP (§14.6 fila "Notificación"). */
@@ -78,7 +130,7 @@ public class AppointmentCommunicationPlanner {
 
     /**
      * RESCHEDULED (v{N+1}): anula las RESCHEDULED anteriores (A-07) y comunica a las tres partes
-     * por EMAIL+IN_APP. La parte CREATOR solo se materializa si el actor no es ya el paciente o el
+     * por EMAIL+IN_APP. La parte CREATOR solo se materializa si el creador no es ya el paciente o el
      * dentista (evita ping a la misma persona dos veces, D-F6-16).
      */
     public void rescheduled(Appointment appointment, Patient patient, Dentist dentist,
@@ -99,7 +151,7 @@ public class AppointmentCommunicationPlanner {
             participant(appointment, CommunicationType.RESCHEDULED, version, RequiredRole.CREATOR,
                     PartyKind.USER, creatorUserId, identityOf(creatorUserId),
                     List.of(Channel.EMAIL, Channel.IN_APP), "Cita reprogramada",
-                    "La cita de " + patientNombre + " fue reprogramada por ti al " + fecha + ".");
+                    "La cita de " + patientNombre + " fue reprogramada al " + fecha + ".");
         }
     }
 
@@ -121,7 +173,7 @@ public class AppointmentCommunicationPlanner {
             participant(appointment, CommunicationType.CANCELLED, version, RequiredRole.CREATOR,
                     PartyKind.USER, creatorUserId, identityOf(creatorUserId),
                     List.of(Channel.EMAIL, Channel.IN_APP), "Cita cancelada",
-                    "Cancelaste la cita de " + patientNombre + " del " + fecha + ".");
+                    "Se canceló la cita de " + patientNombre + " del " + fecha + ".");
         }
     }
 
@@ -134,16 +186,18 @@ public class AppointmentCommunicationPlanner {
                 title, body, PRIORITY));
     }
 
-    /** Aviso in-app al profesional asignado sin fila de intención. */
-    public void notifyDentistInApp(Appointment appointment, Dentist dentist, String title, String body) {
-        notificationRepository.save(Notification.create(dentist.getUserId(), appointment.getId(),
-                title, body, PRIORITY));
-    }
-
     private void supersedePendingRescheduled(Long appointmentId, int currentVersion, Instant now) {
         for (Communication c : communicationRepository.findSupersedable(appointmentId,
                 CommunicationType.RESCHEDULED, CommunicationStatus.PENDING, currentVersion)) {
             c.markSuperseded(now);
+        }
+    }
+
+    /** Llamar con la cita bloqueada, dentro de la misma transacción de cambio de estado/fecha. */
+    public void supersedePendingReminders(Long appointmentId, int throughVersion, Instant now) {
+        for (Communication communication : communicationRepository.lockPendingReminders(
+                appointmentId, throughVersion)) {
+            communication.markSuperseded(now);
         }
     }
 
@@ -160,12 +214,14 @@ public class AppointmentCommunicationPlanner {
             RequiredRole role, PartyKind partyKind, Long partyId, ParticipantIdentity identity,
             Channel channel, String inAppTitle, String inAppBody) {
         if (channel == Channel.EMAIL) {
-            String address = identity.userEmail() != null ? identity.userEmail() : identity.patientEmail();
+            String userEmail = validReminderEmail(identity.userEmail());
+            String patientEmail = validReminderEmail(identity.patientEmail());
+            String address = userEmail != null ? userEmail : patientEmail;
             if (address == null) {
                 noContact(appointment, type, version, channel, role, partyKind, partyId);
                 return;
             }
-            RecipientKind kind = identity.userEmail() != null ? RecipientKind.USER : RecipientKind.PATIENT;
+            RecipientKind kind = userEmail != null ? RecipientKind.USER : RecipientKind.PATIENT;
             Long recipientPatientId = kind == RecipientKind.PATIENT ? identity.patientId() : null;
             Long recipientUserId = kind == RecipientKind.USER ? identity.userId() : null;
             Long identityId = kind == RecipientKind.USER ? identity.userId() : identity.patientId();
@@ -177,7 +233,7 @@ public class AppointmentCommunicationPlanner {
                     recipientUserId, address, communication.getId()));
             return;
         }
-        if (identity.userId() == null || identity.userEmail() == null) {
+        if (identity.userId() == null) {
             noContact(appointment, type, version, channel, role, partyKind, partyId);
             return;
         }
@@ -192,6 +248,17 @@ public class AppointmentCommunicationPlanner {
             Channel channel, RequiredRole role, PartyKind partyKind, Long partyId) {
         intentionRepository.save(CommunicationIntention.noContact(appointment.getId(), type, version,
                 channel, role, partyKind, partyId));
+    }
+
+    private String validReminderEmail(String address) {
+        if (address == null) {
+            return null;
+        }
+        String trimmed = address.strip();
+        return validator.validate(new ReminderEmail(trimmed)).isEmpty() ? trimmed : null;
+    }
+
+    private record ReminderEmail(@NotBlank @Email @Size(max = 320) String address) {
     }
 
     private static boolean creatorNeedsParty(Long creatorUserId, Patient patient, Dentist dentist) {

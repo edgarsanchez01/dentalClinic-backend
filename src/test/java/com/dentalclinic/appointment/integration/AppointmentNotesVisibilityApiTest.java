@@ -192,10 +192,10 @@ class AppointmentNotesVisibilityApiTest extends AppointmentIntegrationTestSuppor
     }
 
     private String bodyWithNotes(Long patientId, int hour) throws Exception {
-        return objectMapper.writeValueAsString(Map.of(
-                "patientId", patientId, "dentistId", dentist.getId(),
-                "startAt", at(MARTES, hour, 0).toString(), "endAt", at(MARTES, hour + 1, 0).toString(),
-                "reason", "Control", "notes", INTERNAL_NOTES));
+        var body = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree(
+                createBody(patientId, dentist.getId(), at(MARTES, hour, 0), at(MARTES, hour + 1, 0)));
+        body.put("notes", INTERNAL_NOTES);
+        return body.toString();
     }
 
     private ResultActions create(String token, String key, String body) throws Exception {

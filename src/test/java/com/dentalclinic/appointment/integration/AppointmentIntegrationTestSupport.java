@@ -53,15 +53,25 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * Base de los tests de integración de citas (F6.D).
  *
  * <p>A diferencia del resto de la suite —que corre con {@code ddl-auto=create-drop} a partir de las
- * entidades— esta base <strong>aplica el DDL real V001..V006</strong> y deja Hibernate en
+ * entidades— esta base <strong>aplica el DDL real V001..V019</strong> (todas las fases
+ * implementadas, porque Hibernate valida el modelo completo) y deja Hibernate en
  * {@code validate}, sobre una base efímera dedicada ({@code dentalclinic_appointments}). Es
  * deliberado: varias reglas aprobadas de Fase 6 son garantía de <strong>motor</strong>, no de
  * aplicación (EXCLUDE anti-doble-booking A-14, índices parciales UNIQUE de llegada/comienzo
  * D-F6-24.b, FK compuestas O-1, {@code ci_uniq}, {@code http_idempotency} UNIQUE). Probarlas sobre
  * un esquema sintético generado por Hibernate no probaría nada.
+ *
+ * <p>El emisor de correo falso ({@link FakeEmailSenderConfiguration}) se registra aquí, en la base
+ * compartida, para que todos los tests de citas reutilicen un único contexto y el DDL no se
+ * reaplique sobre la misma base efímera.
  */
 @AutoConfigureMockMvc
+@Import(FakeEmailSenderConfiguration.class)
 @TestPropertySource(properties = {
+        "dentalclinic.communication.email.enabled=false",
+        "dentalclinic.communication.dispatch.enabled=false",
+        "dentalclinic.appointment.reminder.enabled=false",
+        "dentalclinic.appointment.reminder.email-delivery-enabled=false",
         "spring.datasource.url=jdbc:tc:postgresql:16:///dentalclinic_appointments",
         "spring.jpa.hibernate.ddl-auto=validate",
         "spring.sql.init.mode=always",
@@ -70,7 +80,21 @@ import com.fasterxml.jackson.databind.ObjectMapper;
                 + "file:../db/schema/V003__clinic_onboarding.sql,"
                 + "file:../db/schema/V004__patients_clinical.sql,"
                 + "file:../db/schema/V005__scheduling.sql,"
-                + "file:../db/schema/V006__appointments.sql"
+                + "file:../db/schema/V006__appointments.sql,"
+                + "file:../db/schema/V007__service_catalog.sql,"
+                + "file:../db/schema/V008__appointment_service_snapshot.sql,"
+                + "file:../db/schema/V009__treatments.sql,"
+                + "file:../db/schema/V010__odontogram.sql,"
+                + "file:../db/schema/V011__odontogram_surfaces.sql,"
+                + "file:../db/schema/V012__treatment_evolution.sql,"
+                + "file:../db/schema/V013__clinical_appointment_context.sql,"
+                + "file:../db/schema/V014__clinical_corrections.sql,"
+                + "file:../db/schema/V015__odontogram_history_context.sql,"
+                + "file:../db/schema/V016__financial_module.sql,"
+                + "file:../db/schema/V017__patient_feedback.sql,"
+                + "file:../db/schema/V018__identity_email_outbox.sql,"
+                + "file:../db/schema/V019__patient_medical_intake.sql,"
+                + "file:../db/schema/V020__appointment_checkout.sql"
 })
 public abstract class AppointmentIntegrationTestSupport extends IdentityIntegrationTestSupport {
 
@@ -118,7 +142,13 @@ public abstract class AppointmentIntegrationTestSupport extends IdentityIntegrat
     @Autowired
     protected NotificationRepository notificationRepository;
     @Autowired
+    protected com.dentalclinic.catalog.application.ServiceCatalogService catalog;
+    @Autowired
+    protected com.dentalclinic.catalog.infrastructure.repository.ServiceCatalogRepository catalogRepository;
+    private final Map<Integer, Long> testServices = new java.util.concurrent.ConcurrentHashMap<>();
+    @Autowired
     protected HttpIdempotencyRepository httpIdempotencyRepository;
+    @Autowired protected com.dentalclinic.feedback.application.FeedbackService feedback;
 
     protected Clinic clinic;
     protected User owner;
@@ -133,6 +163,8 @@ public abstract class AppointmentIntegrationTestSupport extends IdentityIntegrat
     @BeforeEach
     void seedAppointmentFixture() {
         TestTime.reset();
+        catalogRepository.deleteAll();
+        testServices.clear();
         refreshSessionRepository.deleteAll();
         resetTokenRepository.deleteAll();
         invitationRepository.deleteAll();
@@ -212,9 +244,22 @@ public abstract class AppointmentIntegrationTestSupport extends IdentityIntegrat
         return "Bearer " + token;
     }
 
+    /** New clinical contract; each use is a distinct operation unless a test explicitly reuses its key. */
+    protected org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder completeRequest(Long id) {
+        return post("/api/appointments/{id}/complete", id).header("Idempotency-Key", java.util.UUID.randomUUID().toString())
+                .contentType(MediaType.APPLICATION_JSON).content("{\"expectedOccurrenceVersion\":"
+                        + appointmentRepository.findById(id).orElseThrow().getOccurrenceVersion() + "}");
+    }
+
     protected String createBody(Long patientId, Long dentistId, Instant startAt, Instant endAt)
             throws Exception {
+        // Explicit isolated fixture only; production never seeds a service or infers one.
+        int duration = Math.max(1, (int) java.time.Duration.between(startAt, endAt).toMinutes());
+        Long serviceId = testServices.computeIfAbsent(duration, value -> catalog.create(
+                new com.dentalclinic.catalog.application.ServiceCatalogService.ServiceData(
+                        "Servicio de prueba " + value, null, java.math.BigDecimal.ONE, value)).getId());
         return objectMapper.writeValueAsString(Map.of(
+                "serviceId", serviceId,
                 "patientId", patientId,
                 "dentistId", dentistId,
                 "startAt", startAt.toString(),

@@ -17,8 +17,10 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
 
 /**
- * El mapeo JPA de las Fases 2, 3, 4, 5 y 6 es <strong>validado</strong> contra el esquema SQL real
- * ({@code V001} a {@code V006}, incluidas las tablas de citas y comunicaciones).
+ * El mapeo JPA de las fases implementadas, incluidos el modulo financiero (V016), el feedback
+ * privado (V017), la outbox de identidad (V018), la intake medico (V019) y la identidad durable del
+ * cierre (V020), es <strong>validado</strong> contra el esquema SQL real ({@code V001} a {@code V020},
+ * incluidas las tablas de citas, catalogo, finanzas y enlaces).
  *
  * <p>En produccion {@code ddl-auto=none} (Architecture.md 12.4) y el esquema se aplica a mano, asi
  * que la coherencia entre entidades y DDL no puede improvisarse. Este test aplica el DDL de
@@ -43,7 +45,21 @@ import org.springframework.test.context.TestPropertySource;
                 + "file:../db/schema/V003__clinic_onboarding.sql,"
                 + "file:../db/schema/V004__patients_clinical.sql,"
                 + "file:../db/schema/V005__scheduling.sql,"
-                + "file:../db/schema/V006__appointments.sql"
+                + "file:../db/schema/V006__appointments.sql,"
+                + "file:../db/schema/V007__service_catalog.sql,"
+                + "file:../db/schema/V008__appointment_service_snapshot.sql,"
+                + "file:../db/schema/V009__treatments.sql,"
+                + "file:../db/schema/V010__odontogram.sql,"
+                + "file:../db/schema/V011__odontogram_surfaces.sql,"
+                + "file:../db/schema/V012__treatment_evolution.sql,"
+                + "file:../db/schema/V013__clinical_appointment_context.sql,"
+                + "file:../db/schema/V014__clinical_corrections.sql,"
+                + "file:../db/schema/V015__odontogram_history_context.sql,"
+                + "file:../db/schema/V016__financial_module.sql,"
+                + "file:../db/schema/V017__patient_feedback.sql,"
+                + "file:../db/schema/V018__identity_email_outbox.sql,"
+                + "file:../db/schema/V019__patient_medical_intake.sql,"
+                + "file:../db/schema/V020__appointment_checkout.sql"
 })
 class SchemaMappingValidationTest {
 
@@ -65,13 +81,53 @@ class SchemaMappingValidationTest {
                         "clinical_note", "clinic_schedule", "clinic_break", "clinic_schedule_exception",
                         "dentist_schedule", "dentist_break", "dentist_schedule_exception", "dentist_time_off",
                         "appointment", "appointment_event", "communication", "notification",
-                        "communication_intention", "http_idempotency");
+                        "communication_intention", "http_idempotency", "service_catalog_item",
+                        "treatment", "tooth_record", "tooth_history", "treatment_tooth",
+                        "tooth_surface_record", "tooth_surface_history", "treatment_evolution",
+                        "charge", "charge_item", "financial_movement", "patient_feedback",
+                        "identity_email_outbox", "appointment_checkout");
+    }
+
+    @Test
+    void identityEmailOutboxEsDesacopladaConInvariantesDeSeguridad() {
+        // Outbox independiente de communication (no comparte appointment_id ni filas).
+        assertThat(columnNames("identity_email_outbox"))
+                .contains("user_id", "purpose", "recipient_email", "token_nonce", "token_hash",
+                        "idempotency_key", "status", "attempts", "last_error", "next_attempt_at",
+                        "lease_until", "sent_at", "superseded_at")
+                .doesNotContain("appointment_id");
+
+        // Solo hash y nonce. La forma del nonce no lo distingue de un token: se verifica por HMAC.
+        assertThat(constraintDef("identity_email_outbox", "identity_email_outbox_hash_format"))
+                .contains("[0-9a-f]{64}");
+        assertThat(constraintDef("identity_email_outbox", "identity_email_outbox_nonce_format"))
+                .contains("[A-Za-z0-9_-]{43}");
+
+        // Referencias de emisión inequívocas e idempotencia de encolado.
+        assertThat(constraintDef("identity_email_outbox", "identity_email_outbox_idempotency_key"))
+                .contains("UNIQUE");
+        assertThat(constraintDef("identity_email_outbox", "identity_email_outbox_nonce_key"))
+                .contains("UNIQUE");
+        assertThat(constraintDef("identity_email_outbox", "identity_email_outbox_hash_key"))
+                .contains("UNIQUE");
+
+        // Propósitos cerrados y coherencia de estado.
+        assertThat(constraintDef("identity_email_outbox", "identity_email_outbox_purpose_check"))
+                .contains("STAFF_INVITATION").contains("PASSWORD_RESET");
+        assertThat(constraintDef("identity_email_outbox", "identity_email_outbox_status_check"))
+                .contains("PENDING").contains("SENT").contains("FAILED");
+        assertThat(constraintDef("identity_email_outbox", "identity_email_outbox_sent_check"))
+                .contains("sent_at IS NOT NULL");
+
+        // Una sola entrega vigente por cuenta y propósito; claim solo sobre filas vigentes.
+        assertThat(indexNames("identity_email_outbox"))
+                .contains("identity_email_outbox_active_idx", "identity_email_outbox_claim_idx");
     }
 
     @Test
     void noSeAdelantanTablasDeFasesPosteriores() {
         assertThat(tableNames())
-                .doesNotContain("treatments", "odontogram", "payments", "services");
+                .doesNotContain("payments", "services");
     }
 
     @Test
@@ -136,6 +192,33 @@ class SchemaMappingValidationTest {
         assertThat(columnNames("clinical_note"))
                 .as("RF-CX-04: las notas son inmutables: no hay updated_at")
                 .doesNotContain("updated_at");
+    }
+
+    @Test
+    void correccionesClinicasSonAditivasConAutoFkYChecks() {
+        // clinical_note: auto-FK a la raiz, par completo, no auto-referencia y longitud del motivo.
+        assertThat(columnNames("clinical_note")).contains("corrects_note_id", "correction_reason");
+        assertThat(constraintDef("clinical_note", "clinical_note_corrects_fk"))
+                .contains("REFERENCES clinical_note(id)");
+        assertThat(constraintDef("clinical_note", "clinical_note_correction_shape"))
+                .contains("corrects_note_id").contains("correction_reason").contains("btrim");
+        assertThat(constraintDef("clinical_note", "clinical_note_correction_not_self"))
+                .contains("corrects_note_id <> id");
+        assertThat(constraintDef("clinical_note", "clinical_note_correction_reason_length"))
+                .contains("1000");
+        assertThat(indexNames("clinical_note")).contains("clinical_note_root_idx",
+                "clinical_note_root_attention_idx", "clinical_note_corrects_idx");
+
+        // treatment_evolution: mismas invariantes sobre su propia raiz.
+        assertThat(columnNames("treatment_evolution")).contains("corrects_evolution_id", "correction_reason");
+        assertThat(constraintDef("treatment_evolution", "treatment_evolution_corrects_fk"))
+                .contains("REFERENCES treatment_evolution(id)");
+        assertThat(constraintDef("treatment_evolution", "treatment_evolution_correction_shape"))
+                .contains("corrects_evolution_id").contains("btrim");
+        assertThat(constraintDef("treatment_evolution", "treatment_evolution_correction_not_self"))
+                .contains("corrects_evolution_id <> id");
+        assertThat(indexNames("treatment_evolution")).contains("treatment_evolution_root_idx",
+                "treatment_evolution_root_attention_idx", "treatment_evolution_corrects_idx");
     }
 
     @Test
@@ -305,6 +388,58 @@ class SchemaMappingValidationTest {
                 .contains("UNIQUE (actor_user_id, operation, idempotency_key)");
         assertThat(constraintDef("http_idempotency", "http_idempotency_response_status_check"))
                 .contains("response_status >= 200").contains("599");
+    }
+
+    @Test
+    void finanzasSonAppendOnlyConInvariantesDeInmutabilidad() {
+        // El historial financiero no se edita: ni charge_item ni financial_movement tienen updated_at.
+        assertThat(columnNames("charge_item")).doesNotContain("updated_at");
+        assertThat(columnNames("financial_movement")).doesNotContain("updated_at");
+        // El cargo no persiste estado ni saldo: se derivan.
+        assertThat(columnNames("charge")).doesNotContain("status", "balance", "saldo");
+        // Un movimiento original admite a lo sumo UNA reversa.
+        assertThat(constraintDef("financial_movement", "financial_movement_reverses_unique"))
+                .contains("UNIQUE (reverses_movement_id)");
+        // Coherencia estricta tipo/direccion/metodo/reversa/motivo.
+        assertThat(constraintDef("financial_movement", "financial_movement_shape"))
+                .contains("PAYMENT").contains("REVERSAL");
+        assertThat(constraintDef("financial_movement", "financial_movement_type_check"))
+                .contains("PAYMENT").contains("REVERSAL");
+        // pg_get_constraintdef normaliza la expresion; se comprueba la forma esencial.
+        assertThat(constraintDef("financial_movement", "financial_movement_amount_positive"))
+                .contains("amount").contains(">");
+        // El total de linea del concepto es exactamente cantidad * precio unitario.
+        assertThat(constraintDef("charge_item", "charge_item_line_total_matches"))
+                .contains("line_total").contains("quantity").contains("unit_price");
+        // La auditoria se preserva: nunca CASCADE.
+        assertThat(constraintDef("charge_item", "charge_item_charge_fkey"))
+                .contains("ON DELETE RESTRICT");
+        assertThat(constraintDef("financial_movement", "financial_movement_reverses_fkey"))
+                .contains("ON DELETE RESTRICT");
+    }
+
+    @Test
+    void appointmentCheckoutEsAppendOnlyConUnCierreMaximoPorCita() {
+        assertThat(columnNames("appointment_checkout"))
+                .containsExactlyInAnyOrder("id", "appointment_id", "occurrence_version", "charge_id",
+                        "payment_movement_id", "charge_disposition", "actor_user_id", "completed_at")
+                .doesNotContain("updated_at", "status", "balance", "saldo");
+        assertThat(constraintDef("appointment_checkout", "appointment_checkout_appointment_key"))
+                .contains("UNIQUE (appointment_id)");
+        assertThat(constraintDef("appointment_checkout", "appointment_checkout_payment_key"))
+                .contains("UNIQUE (payment_movement_id)");
+        assertThat(constraintDef("appointment_checkout", "appointment_checkout_occurrence_check"))
+                .contains("occurrence_version >= 1");
+        assertThat(constraintDef("appointment_checkout", "appointment_checkout_disposition_check"))
+                .contains("CREATED").contains("REUSED");
+        assertThat(constraintDef("appointment_checkout", "appointment_checkout_appointment_fkey"))
+                .contains("ON DELETE RESTRICT");
+        assertThat(constraintDef("appointment_checkout", "appointment_checkout_charge_fkey"))
+                .contains("ON DELETE RESTRICT");
+        assertThat(constraintDef("appointment_checkout", "appointment_checkout_payment_fkey"))
+                .contains("ON DELETE RESTRICT");
+        assertThat(constraintDef("appointment_checkout", "appointment_checkout_actor_fkey"))
+                .contains("ON DELETE RESTRICT");
     }
 
     @Test

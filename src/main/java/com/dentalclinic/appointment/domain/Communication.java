@@ -118,7 +118,111 @@ public class Communication {
 
     /** A-07/D-F6-20: marca de tratamiento para comunicaciones no duplicables anuladas. No es estado. */
     public void markSuperseded(Instant now) {
-        this.supersededAt = Objects.requireNonNull(now, "now es obligatorio");
+        Objects.requireNonNull(now, "now es obligatorio");
+        if (this.supersededAt == null) {
+            this.supersededAt = now;
+        }
+        if (type == CommunicationType.REMINDER) {
+            this.nextRetryAt = null;
+            this.updatedAt = now;
+        }
+    }
+
+    /** Reserva de REMINDER: reclamar no equivale a intentar SMTP. El intento se suma al preparar. */
+    public void reserveReminder(Instant leaseUntil, Instant now) {
+        requireReminder();
+        requireDispatchable();
+        this.nextRetryAt = Objects.requireNonNull(leaseUntil);
+        this.updatedAt = Objects.requireNonNull(now);
+    }
+
+    /** Una aceptación externa sigue siendo real aunque la cita se haya invalidado durante SMTP. */
+    public void recordReminderAccepted(Instant now) {
+        requireReminder();
+        if (status == CommunicationStatus.SENT) {
+            return;
+        }
+        this.status = CommunicationStatus.SENT;
+        this.sentAt = Objects.requireNonNull(now);
+        this.lastError = null;
+        this.nextRetryAt = null;
+        this.updatedAt = now;
+        // supersededAt se conserva como historial; no reactiva la comunicación.
+    }
+
+    /** Fallo real de un envío en curso ya obsoleto: registrar error sin programar retry ni FAILED. */
+    public void recordObsoleteReminderError(String error, Instant now) {
+        requireReminder();
+        if (status == CommunicationStatus.PENDING && supersededAt != null) {
+            this.lastError = error;
+            this.nextRetryAt = null;
+            this.updatedAt = Objects.requireNonNull(now);
+        }
+    }
+
+    private void requireReminder() {
+        if (type != CommunicationType.REMINDER) {
+            throw new IllegalStateException("Esta operación solo corresponde a recordatorios.");
+        }
+    }
+
+    /**
+     * El dispatcher (F8) reclama la fila antes de abrir SMTP: suma un intento y empuja
+     * {@code nextRetryAt} hasta el fin del lease. El lease reserva la fila ante otros dispatchers
+     * sin mantener una transacción abierta durante el envío; si el proceso muere, la fila se
+     * vuelve elegible al vencer el lease (no se pierde).
+     */
+    public void markClaimStarted(Instant leaseUntil, Instant now) {
+        requireDispatchable();
+        this.attempts = this.attempts + 1;
+        this.nextRetryAt = Objects.requireNonNull(leaseUntil, "leaseUntil es obligatorio");
+        this.updatedAt = Objects.requireNonNull(now, "now es obligatorio");
+    }
+
+    /** SENT: el proveedor confirmó el envío (única transición terminal de éxito). */
+    public void markSent(Instant now) {
+        requireDispatchable();
+        this.status = CommunicationStatus.SENT;
+        this.sentAt = Objects.requireNonNull(now, "now es obligatorio");
+        this.lastError = null;
+        this.nextRetryAt = null;
+        this.updatedAt = now;
+    }
+
+    /** Aceptación del intento reservado no-REMINDER, conservando una invalidación durante SMTP. */
+    public void recordAccepted(Instant now) {
+        if (type == CommunicationType.REMINDER || status != CommunicationStatus.PENDING) {
+            throw new IllegalStateException("La aceptación no corresponde a un aviso pendiente.");
+        }
+        this.status = CommunicationStatus.SENT;
+        this.sentAt = Objects.requireNonNull(now);
+        this.lastError = null;
+        this.nextRetryAt = null;
+        this.updatedAt = now;
+    }
+
+    /** Fallo con reintentos disponibles: se conserva PENDING y se programa el siguiente intento. */
+    public void scheduleRetry(String error, Instant nextRetryAt, Instant now) {
+        requireDispatchable();
+        this.lastError = error;
+        this.nextRetryAt = Objects.requireNonNull(nextRetryAt, "nextRetryAt es obligatorio");
+        this.updatedAt = Objects.requireNonNull(now, "now es obligatorio");
+    }
+
+    /** Fallo definitivo: se agotaron los intentos; queda registrada para intervención (R24/§34.12). */
+    public void markFailed(String error, Instant now) {
+        requireDispatchable();
+        this.status = CommunicationStatus.FAILED;
+        this.lastError = error;
+        this.nextRetryAt = null;
+        this.updatedAt = Objects.requireNonNull(now, "now es obligatorio");
+    }
+
+    private void requireDispatchable() {
+        if (status != CommunicationStatus.PENDING || supersededAt != null) {
+            throw new IllegalStateException(
+                    "Solo una comunicacion PENDING vigente puede cambiar de estado de entrega");
+        }
     }
 
     public Long getId() {

@@ -52,11 +52,14 @@ public class AppointmentController {
 
     private final AppointmentService appointmentService;
     private final AppointmentCreateCoordinator createCoordinator;
+    private final CompleteAppointmentRequestParser completeParser;
 
     public AppointmentController(AppointmentService appointmentService,
-                                 AppointmentCreateCoordinator createCoordinator) {
+                                 AppointmentCreateCoordinator createCoordinator,
+                                 CompleteAppointmentRequestParser completeParser) {
         this.appointmentService = appointmentService;
         this.createCoordinator = createCoordinator;
+        this.completeParser = completeParser;
     }
 
     /** Creación de cita idempotente (§17.5). El estado de respuesta es 201 vía {@code Idempotency-Key}. */
@@ -121,26 +124,24 @@ public class AppointmentController {
     }
 
     @PostMapping("/{id}/complete")
-    public AppointmentResponse complete(@PathVariable("id") Long id) {
-        return appointmentService.complete(id, CurrentUser.require());
+    public AppointmentResponse complete(@PathVariable("id") Long id,
+            @RequestBody(required = false) String body,
+            @RequestHeader(value = "Idempotency-Key", required = false) String key) {
+        var actor = CurrentUser.require();
+        if (body == null && key == null && actor.role() == com.dentalclinic.identity.domain.Role.OWNER) {
+            return appointmentService.complete(id, actor);
+        }
+        if (body == null) {
+            throw new com.dentalclinic.scheduling.domain.exception.InvalidScheduleException(
+                    "expectedOccurrenceVersion e Idempotency-Key son obligatorios.");
+        }
+        return appointmentService.complete(id, actor, completeParser.parse(body).expectedOccurrenceVersion(), key);
     }
 
     /** Declaración de ausencia: solo OWNER|RECEPTIONIST y desde que la cita comenzó (A-18). */
     @PostMapping("/{id}/no-show")
     public AppointmentResponse noShow(@PathVariable("id") Long id) {
         return appointmentService.markNoShow(id, CurrentUser.require());
-    }
-
-    /** Llegada del paciente, registrada por el profesional asignado. 409 si ya se registró (A-09). */
-    @PostMapping("/{id}/arrive")
-    public AppointmentEventView arrive(@PathVariable("id") Long id) {
-        return appointmentService.arrival(id, CurrentUser.require());
-    }
-
-    /** Comienzo del tratamiento, registrado por el profesional asignado. Misma deduplicación. */
-    @PostMapping("/{id}/start")
-    public AppointmentEventView start(@PathVariable("id") Long id) {
-        return appointmentService.start(id, CurrentUser.require());
     }
 
     private static AppointmentEventView toEventView(AppointmentEvent event) {

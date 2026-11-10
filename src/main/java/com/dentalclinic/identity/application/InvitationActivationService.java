@@ -83,7 +83,7 @@ public class InvitationActivationService {
                 ? activatePending(invitation.getUserId().get(), passwordHash)
                 : registerFromInvitation(invitation, passwordHash);
 
-        if (invitationRepository.consumeAtomically(tokenHash, user.getId(), now) != 1) {
+        if (invitationRepository.consumeAtomically(tokenHash, user.getId(), clock.instant()) != 1) {
             // Otra petición ganó el consumo, o la invitación ya no es la vigente. Se relanza y la
             // transacción deshace el alta de la cuenta.
             throw new InvalidTokenException();
@@ -95,7 +95,8 @@ public class InvitationActivationService {
      * Modo "personal" (PRD §6.5.2 opción A): la cuenta ya existe y está pendiente de activar.
      */
     private User activatePending(Long userId, String passwordHash) {
-        User user = userRepository.findById(userId).orElseThrow(InvalidTokenException::new);
+        // Orden común con reemisión: user → invitation; el UPDATE condicional vuelve a validar el hash.
+        User user = userRepository.findByIdForUpdate(userId).orElseThrow(InvalidTokenException::new);
         if (user.isActive()) {
             // Ya activada: la invitación es redundante o los datos son incoherentes. Se responde
             // igual que ante un token caducado en lugar de revelar el estado de la cuenta.

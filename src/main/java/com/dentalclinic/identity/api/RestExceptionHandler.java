@@ -51,6 +51,13 @@ public class RestExceptionHandler {
 
     private static final String GENERIC_500 = "Ha ocurrido un error inesperado. Inténtalo de nuevo.";
 
+    @ExceptionHandler(com.dentalclinic.patient.domain.MedicalOnboardingRequiredException.class)
+    public ResponseEntity<ErrorResponse> handleMedicalOnboardingRequired(RuntimeException e, HttpServletRequest request) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).header("Cache-Control", "no-store")
+                .body(new ErrorResponse(409, "Conflict", e.getMessage(), request.getRequestURI(),
+                        java.time.Instant.now(), null, "MEDICAL_ONBOARDING_REQUIRED"));
+    }
+
     @ExceptionHandler({InvalidCredentialsException.class, AccountInactiveException.class,
             NeutralAuthenticationException.class})
     public ResponseEntity<ErrorResponse> handleUnauthorized(RuntimeException e, HttpServletRequest request) {
@@ -64,9 +71,18 @@ public class RestExceptionHandler {
     }
 
     @ExceptionHandler({MissingCurrentPasswordException.class, PasswordExceedsHashingLimitException.class,
+            jakarta.validation.ConstraintViolationException.class,
+            org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class,
+            org.springframework.web.bind.MissingServletRequestParameterException.class,
             InvalidClinicConfigurationException.class,
             com.dentalclinic.scheduling.domain.exception.InvalidScheduleException.class})
-    public ResponseEntity<ErrorResponse> handleBadRequest(RuntimeException e, HttpServletRequest request) {
+    public ResponseEntity<ErrorResponse> handleBadRequest(Exception e, HttpServletRequest request) {
+        if (e instanceof jakarta.validation.ConstraintViolationException
+                || e instanceof org.springframework.web.method.annotation.MethodArgumentTypeMismatchException
+                || e instanceof org.springframework.web.bind.MissingServletRequestParameterException) {
+            return ResponseEntity.badRequest().header("Cache-Control", "no-store").body(ErrorResponse.of(
+                    400, "Bad Request", "Revisa el formato de los datos de la solicitud.", request.getRequestURI()));
+        }
         return respond(HttpStatus.BAD_REQUEST, e, request);
     }
 
@@ -78,12 +94,14 @@ public class RestExceptionHandler {
      * no una acción prohibida. La acción prohibida (instalación ya configurada) es 403.
      */
     @ExceptionHandler({EmailAlreadyRegisteredException.class,
+            com.dentalclinic.catalog.domain.ServiceUnavailableException.class,
             InstallationConcurrencyConflictException.class,
             com.dentalclinic.scheduling.domain.ScheduleConflictException.class,
             DataIntegrityViolationException.class})
     public ResponseEntity<ErrorResponse> handleConflict(RuntimeException e, HttpServletRequest request) {
         if (e instanceof DataIntegrityViolationException) {
-            log.warn("Violación de integridad en {}: {}", request.getRequestURI(), e.getMessage());
+            // PostgreSQL may include the rejected row (including medical data) in message/cause.
+            log.warn("Violación de integridad; tipo={}", e.getClass().getSimpleName());
             return ResponseEntity.status(HttpStatus.CONFLICT).body(ErrorResponse.of(
                     HttpStatus.CONFLICT.value(),
                     HttpStatus.CONFLICT.getReasonPhrase(),
@@ -178,7 +196,8 @@ public class RestExceptionHandler {
      */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpected(Exception e, HttpServletRequest request) {
-        log.error("Fallo no controlado en {}", request.getRequestURI(), e);
+        // Neither throwable nor message/cause is safe for logs containing clinical writes.
+        log.error("Fallo no controlado; tipo={}", e.getClass().getSimpleName());
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ErrorResponse.of(
                 HttpStatus.INTERNAL_SERVER_ERROR.value(),
                 HttpStatus.INTERNAL_SERVER_ERROR.getReasonPhrase(),

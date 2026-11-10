@@ -15,6 +15,7 @@ public enum AppointmentEventType {
     APPOINTMENT_CANCELLED,
     APPOINTMENT_COMPLETED,
     APPOINTMENT_NO_SHOW,
+    // T4.4: solo compatibilidad de lectura del historial; no se emiten en el flujo operativo.
     PATIENT_ARRIVED,
     APPOINTMENT_STARTED,
     REMINDER_SENT,

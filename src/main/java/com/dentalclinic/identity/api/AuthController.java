@@ -3,6 +3,9 @@ package com.dentalclinic.identity.api;
 import java.time.Clock;
 import java.time.Duration;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseCookie;
@@ -25,11 +28,12 @@ import com.dentalclinic.identity.api.dto.UserDto;
 import com.dentalclinic.identity.application.InvitationActivationService;
 import com.dentalclinic.identity.application.IssuedSession;
 import com.dentalclinic.identity.application.PasswordService;
+import com.dentalclinic.identity.application.IdentityRequestLimiter;
+import com.dentalclinic.identity.infrastructure.security.IdentityClientAddress;
 import com.dentalclinic.identity.application.ProfileService;
 import com.dentalclinic.identity.application.ProfileService.UserProfile;
 import com.dentalclinic.identity.application.RegistrationService;
 import com.dentalclinic.identity.application.RegistrationService.RegistrationData;
-import com.dentalclinic.identity.application.RegistrationService.RegisteredUser;
 import com.dentalclinic.identity.application.SessionService;
 import com.dentalclinic.identity.domain.User;
 import com.dentalclinic.identity.infrastructure.security.AuthenticatedUser;
@@ -54,6 +58,8 @@ import jakarta.validation.Valid;
 @RequestMapping("/api/auth")
 public class AuthController {
 
+    private static final Logger log = LoggerFactory.getLogger(AuthController.class);
+
     private final SessionService sessionService;
     private final InvitationActivationService invitationActivationService;
     private final PasswordService passwordService;
@@ -61,6 +67,9 @@ public class AuthController {
     private final RegistrationService registrationService;
     private final RefreshCookieFactory refreshCookieFactory;
     private final Clock clock;
+    private final IdentityRequestLimiter identityLimiter;
+    private final IdentityClientAddress clientAddress;
+    private final com.dentalclinic.patient.application.PatientService patients;
 
     public AuthController(SessionService sessionService,
                           InvitationActivationService invitationActivationService,
@@ -68,7 +77,8 @@ public class AuthController {
                           ProfileService profileService,
                           RegistrationService registrationService,
                           RefreshCookieFactory refreshCookieFactory,
-                          Clock clock) {
+                           Clock clock, IdentityRequestLimiter identityLimiter, IdentityClientAddress clientAddress,
+                           com.dentalclinic.patient.application.PatientService patients) {
         this.sessionService = sessionService;
         this.invitationActivationService = invitationActivationService;
         this.passwordService = passwordService;
@@ -76,31 +86,28 @@ public class AuthController {
         this.registrationService = registrationService;
         this.refreshCookieFactory = refreshCookieFactory;
         this.clock = clock;
+        this.identityLimiter = identityLimiter;
+        this.clientAddress = clientAddress;
+        this.patients = patients;
     }
 
     @PostMapping("/login")
     public ResponseEntity<LoginResponse> login(@Valid @RequestBody LoginRequest request,
                                                HttpServletRequest httpRequest) {
         IssuedSession session = sessionService.login(request.email(), request.password());
-        return ResponseEntity.ok()
-                .header(HttpHeaders.SET_COOKIE,
-                        refreshCookieFactory.issue(session.refreshToken(), ttlOf(session)).toString())
-                .body(new LoginResponse(session.accessToken(), "Bearer",
-                        session.accessTokenExpiresAt(), toDto(session.user())));
+        return sessionResponse(session, HttpStatus.OK);
     }
 
     /**
-     * Registro publico de paciente (RF-IA-05/06). Crea cuenta + paciente y responde 201 con el
-     * perfil. No abre sesion: entrar pasa por {@code /login}. El rol nunca viaja en el cuerpo.
+     * Registro público: User + Patient + sesión atómicos. Mismo contrato seguro que login,
+     * con 201; /me sigue siendo la fuente autoritativa de perfil y onboarding.
      */
     @PostMapping("/register")
-    @ResponseStatus(HttpStatus.CREATED)
-    public UserDto register(@Valid @RequestBody RegisterRequest request) {
-        RegisteredUser registered = registrationService.register(new RegistrationData(
+    public ResponseEntity<LoginResponse> register(@Valid @RequestBody RegisterRequest request) {
+        IssuedSession session = registrationService.register(new RegistrationData(
                 request.email(), request.password(), request.firstName(), request.lastName(),
                 request.phone(), request.birthDate()));
-        return new UserDto(registered.userId(), registered.email(), registered.role(),
-                registered.active(), registered.createdAt(), registered.patientId(), null);
+        return sessionResponse(session, HttpStatus.CREATED);
     }
 
     /**
@@ -117,8 +124,16 @@ public class AuthController {
     /** Recuperación: neutra (nunca revela si el email existe) y asíncrona (202). */
     @PostMapping("/password/forgot")
     @ResponseStatus(HttpStatus.ACCEPTED)
-    public void forgot(@Valid @RequestBody ForgotPasswordRequest request) {
-        passwordService.requestReset(request.email());
+    public void forgot(@Valid @RequestBody ForgotPasswordRequest request, HttpServletRequest httpRequest) {
+        try {
+            if (identityLimiter.allowResetIp(clientAddress.resolve(httpRequest))) {
+                passwordService.requestReset(request.email());
+            }
+        } catch (RuntimeException ex) {
+            // El proxy transaccional del servicio ya hizo rollback. Mismo 202 incluso ante fallo interno;
+            // no registrar el mensaje/causa/entrada ni distinguir existencia de la cuenta.
+            log.warn("No se pudo procesar la recuperación de identidad: {}", ex.getClass().getSimpleName());
+        }
     }
 
     /** Restablecimiento con token de un solo uso. */
@@ -161,13 +176,24 @@ public class AuthController {
     public ResponseEntity<UserDto> me() {
         AuthenticatedUser principal = CurrentUser.require();
         UserProfile profile = profileService.profileOf(principal.userId());
-        return ResponseEntity.ok(new UserDto(profile.userId(), profile.email(), profile.role(),
-                profile.active(), profile.createdAt(), profile.patientId(), profile.dentistId()));
+        return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "no-store").body(new UserDto(
+                profile.userId(), profile.email(), profile.role(), profile.active(), profile.createdAt(),
+                profile.patientId(), profile.dentistId(), profile.role() == com.dentalclinic.identity.domain.Role.PATIENT
+                        ? patients.medicalOnboardingFor(principal.userId()).orElse(null) : null));
     }
 
     private UserDto toDto(User user) {
         return new UserDto(user.getId(), user.getEmail(), user.getRole(), user.isActive(),
                 user.getCreatedAt(), null, null);
+    }
+
+    private ResponseEntity<LoginResponse> sessionResponse(IssuedSession session, HttpStatus status) {
+        return ResponseEntity.status(status)
+                .header(HttpHeaders.CACHE_CONTROL, "no-store")
+                .header(HttpHeaders.SET_COOKIE,
+                        refreshCookieFactory.issue(session.refreshToken(), ttlOf(session)).toString())
+                .body(new LoginResponse(session.accessToken(), "Bearer",
+                        session.accessTokenExpiresAt(), toDto(session.user())));
     }
 
     private Duration ttlOf(IssuedSession session) {

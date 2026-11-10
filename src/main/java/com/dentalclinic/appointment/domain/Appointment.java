@@ -1,6 +1,7 @@
 package com.dentalclinic.appointment.domain;
 
 import java.time.Instant;
+import java.math.BigDecimal;
 import java.util.Objects;
 
 import jakarta.persistence.Column;
@@ -21,7 +22,8 @@ import jakarta.persistence.Table;
  *
  * <p>La disponibilidad usa el intervalo semiabierto {@code [start_at, end_at)} (RF-AV-06); la
  * constraint EXCLUDE de V006 impide que dos citas {@code SCHEDULED} del mismo dentista solapen
- * (A-14). {@code durationMinutes} es derivado de {@code end - start} en escritura.
+ * (A-14). Las nuevas citas capturan el servicio y su duración autoritativa; la reprogramación
+ * conserva esa duración. Las filas históricas sin servicio conservan sus datos originales.
  */
 @Entity
 @Table(name = "appointment")
@@ -48,6 +50,17 @@ public class Appointment {
 
     @Column(name = "duration_minutes", nullable = false)
     private int durationMinutes;
+
+    @Column(name = "service_id", updatable = false)
+    private Long serviceId;
+    @Column(name = "service_name", length = 200, updatable = false)
+    private String serviceName;
+    @Column(name = "service_description", length = 4000, updatable = false)
+    private String serviceDescription;
+    @Column(name = "service_reference_price", precision = 19, scale = 4, updatable = false)
+    private BigDecimal serviceReferencePrice;
+    @Column(name = "service_duration_minutes", updatable = false)
+    private Integer serviceDurationMinutes;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false, length = 12)
@@ -98,8 +111,25 @@ public class Appointment {
                 durationMinutes, reason, notes);
     }
 
+    public void captureService(Long id, String name, String description, BigDecimal referencePrice, int duration) {
+        if (serviceId != null) throw new IllegalStateException("El snapshot de servicio es inmutable.");
+        if (duration != durationMinutes) throw new IllegalArgumentException("La duración no coincide con el servicio.");
+        serviceId = Objects.requireNonNull(id);
+        serviceName = Objects.requireNonNull(name);
+        serviceDescription = description;
+        serviceReferencePrice = Objects.requireNonNull(referencePrice);
+        serviceDurationMinutes = duration;
+    }
+
+    public Long getServiceId() { return serviceId; }
+    public String getServiceName() { return serviceName; }
+    public String getServiceDescription() { return serviceDescription; }
+    public BigDecimal getServiceReferencePrice() { return serviceReferencePrice; }
+    public Integer getServiceDurationMinutes() { return serviceDurationMinutes; }
+
     /** Sigue estando {@code SCHEDULED} (la reprogramación no cambia de estado) e incrementa la versión. */
     public void reschedule(Instant startAt, Instant endAt, int durationMinutes, Instant now) {
+        if (durationMinutes != this.durationMinutes) throw new IllegalArgumentException("La reprogramación conserva la duración histórica.");
         this.startAt = Objects.requireNonNull(startAt, "startAt es obligatorio");
         this.endAt = Objects.requireNonNull(endAt, "endAt es obligatorio");
         this.durationMinutes = durationMinutes;

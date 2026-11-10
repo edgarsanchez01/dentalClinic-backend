@@ -38,6 +38,18 @@ import jakarta.servlet.http.Cookie;
 @EnableWebSecurity
 @EnableMethodSecurity
 public class SecurityConfig {
+    /** Solo GET/POST de un enlace: no publica listados ni detalles privados. */
+    static final RequestMatcher PUBLIC_FEEDBACK = request -> {
+        String path = request.getRequestURI().substring(request.getContextPath().length());
+        return ("GET".equals(request.getMethod()) || "POST".equals(request.getMethod()))
+                && path.matches("/api/feedback/invitations/[^/]{1,256}");
+    };
+    /** Publicación exacta de catálogo activo; solo GET, sin abrir /api/public/**. */
+    static final RequestMatcher PUBLIC_SERVICES_READ = request -> {
+        String path = request.getRequestURI().substring(request.getContextPath().length());
+        return "GET".equals(request.getMethod()) && (path.equals("/api/public/services")
+                || path.matches("/api/public/services/[0-9]+"));
+    };
 
     /**
      * Rutas públicas que <strong>no</strong> dependen de cookie y por tanto quedan fuera de CSRF.
@@ -106,6 +118,7 @@ public class SecurityConfig {
                         .csrfTokenRepository(csrfTokenRepository())
                         .csrfTokenRequestHandler(csrfRequestHandler)
                         .ignoringRequestMatchers(PUBLIC_PATHS_WITHOUT_COOKIE)
+                        .ignoringRequestMatchers(PUBLIC_FEEDBACK)
                         .requireCsrfProtectionMatcher(cookieDependentRequestMatcher()))
                 .exceptionHandling(exceptions -> exceptions
                         .authenticationEntryPoint(authenticationEntryPoint)
@@ -113,6 +126,8 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> {
                     auth.requestMatchers(PUBLIC_PATHS_WITHOUT_COOKIE).permitAll();
                     auth.requestMatchers(PUBLIC_PATHS_WITH_COOKIE).permitAll();
+                    auth.requestMatchers(PUBLIC_SERVICES_READ).permitAll();
+                    auth.requestMatchers(PUBLIC_FEEDBACK).permitAll();
                     // Sondeo de vida del proceso: lo consultan Docker, Kubernetes y el
                     // balanceador sin credenciales (Architecture.md 20).
                     auth.requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info").permitAll();
@@ -179,7 +194,7 @@ public class SecurityConfig {
         CorsConfiguration configuration = new CorsConfiguration();
         configuration.setAllowedOrigins(properties.cors().allowedOrigins());
         configuration.setAllowedMethods(List.of("GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"));
-        configuration.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-XSRF-TOKEN"));
+        configuration.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-XSRF-TOKEN", "Idempotency-Key"));
         configuration.setExposedHeaders(List.of("Set-Cookie"));
         configuration.setAllowCredentials(true);
         configuration.setMaxAge(3600L);

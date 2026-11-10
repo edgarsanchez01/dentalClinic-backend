@@ -16,6 +16,15 @@ public interface PasswordResetTokenRepository extends JpaRepository<PasswordRese
 
     long deleteByUserId(Long userId);
 
+    boolean existsByUserIdAndUsedAtIsNullAndExpiresAtAfter(Long userId, Instant now);
+
+    java.util.List<PasswordResetToken> findByUserIdAndUsedAtIsNullAndExpiresAtAfter(Long userId, Instant now);
+
+    /** Retira emisiones antiguas sin borrar el histórico ni prolongar su vigencia. */
+    @Modifying(flushAutomatically = true)
+    @Query("UPDATE PasswordResetToken t SET t.usedAt = :now WHERE t.userId = :userId AND t.usedAt IS NULL")
+    int revokeUnusedByUserId(@Param("userId") Long userId, @Param("now") Instant now);
+
     /**
      * Consumo atómico de un token de un solo uso (RF-IA-12, §24.6).
      *

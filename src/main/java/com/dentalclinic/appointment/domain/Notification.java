@@ -79,6 +79,26 @@ public class Notification {
         return new Notification(userId, appointmentId, title, body, priority);
     }
 
+    /**
+     * Marca la notificación como leída. Es <strong>idempotente</strong>: si ya estaba leída
+     * conserva su {@code readAt} original (marcar dos veces no reescribe la fecha).
+     */
+    public void markRead(Instant now) {
+        if (readAt == null) {
+            this.readAt = Objects.requireNonNull(now, "now es obligatorio");
+        }
+    }
+
+    /** @return {@code true} si la notificación ya fue leída ({@code read_at} no nulo). */
+    public boolean isRead() {
+        return readAt != null;
+    }
+
+    /** @return {@code true} si la notificación pertenece al buzón del usuario indicado. */
+    public boolean belongsTo(Long otherUserId) {
+        return userId.equals(otherUserId);
+    }
+
     public Long getId() {
         return id;
     }

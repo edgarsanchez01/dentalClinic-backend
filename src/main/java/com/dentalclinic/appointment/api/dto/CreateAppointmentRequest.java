@@ -3,6 +3,7 @@ package com.dentalclinic.appointment.api.dto;
 import java.time.Instant;
 
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
 
 /**
  * Solicitud de creación de cita (RF-AP-*). El rango horario llega en instantes ISO-8601; la
@@ -14,5 +15,7 @@ public record CreateAppointmentRequest(
         @NotNull(message = "El inicio de la cita es obligatorio.") Instant startAt,
         @NotNull(message = "El fin de la cita es obligatorio.") Instant endAt,
         String reason,
-        String notes) {
+        String notes,
+        @NotNull(message = "Selecciona un servicio activo.") @Positive
+        @com.fasterxml.jackson.databind.annotation.JsonDeserialize(using = ServiceIdDeserializer.class) Long serviceId) {
 }

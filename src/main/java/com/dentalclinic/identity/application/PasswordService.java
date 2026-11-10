@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.dentalclinic.identity.domain.EmailCanonicalizer;
+import com.dentalclinic.identity.domain.IdentityEmailPurpose;
 import com.dentalclinic.identity.domain.PasswordPolicy;
 import com.dentalclinic.identity.domain.PasswordResetToken;
 import com.dentalclinic.identity.domain.User;
@@ -49,6 +50,8 @@ public class PasswordService {
     private final SecurityProperties properties;
     private final SessionService sessionService;
     private final Clock clock;
+    private final IdentityLinkIssuer linkIssuer;
+    private final IdentityIssuancePolicy issuancePolicy;
 
     public PasswordService(UserRepository userRepository,
                            PasswordResetTokenRepository resetTokenRepository,
@@ -56,7 +59,7 @@ public class PasswordService {
                            TokenHasher tokenHasher,
                            SecurityProperties properties,
                            SessionService sessionService,
-                           Clock clock) {
+                           Clock clock, IdentityLinkIssuer linkIssuer, IdentityIssuancePolicy issuancePolicy) {
         this.userRepository = userRepository;
         this.resetTokenRepository = resetTokenRepository;
         this.passwordEncoder = passwordEncoder;
@@ -64,6 +67,8 @@ public class PasswordService {
         this.properties = properties;
         this.sessionService = sessionService;
         this.clock = clock;
+        this.linkIssuer = linkIssuer;
+        this.issuancePolicy = issuancePolicy;
     }
 
     /**
@@ -97,28 +102,32 @@ public class PasswordService {
      * <p>La respuesta es <strong>neutra</strong>: si el email no existe, si la cuenta está
      * desactivada o si el token se emite, el resultado observable para el cliente es el mismo. La
      * comprobación de existencia ocurre igualmente —hay que saber a quién emitirle el token— pero
-     * nunca cambia el status, ni el mensaje, ni el tiempo de respuesta de forma observable.
+     * nunca cambia el status ni el cuerpo HTTP. No se promete tiempo de respuesta constante.
      *
      * <p>El token en claro <strong>no sale de este servicio</strong>: no se devuelve, no se registra
      * y no viaja en la respuesta. No es una precaución estética, es la razón por la que un token
-     * de recuperación no puede filtrarse por un log. En Fase 2 no existe canal de entrega (las
-     * comunicaciones por email son Fase 8), de modo que el enlace no llega a nadie todavía: el
-     * token queda persistido solo como hash y expira por sí solo. Los tests del flujo de
-     * restablecimiento crean el token por el repositorio, nunca por este método.
+     * de recuperación no puede filtrarse por un log. Desde 8B.3, con enlaces configurados,
+     * IdentityLinkIssuer guarda HMAC/hash + outbox atómicamente. Una emisión viva entregable se
+     * coalesce sin revocarla/prolongarla; las no entregables se retiran al emitir una nueva.
+     * Sin configuración se conserva el modo opaco legacy. D4 no bloquea login ni consumo.
      */
     @Transactional
     public void requestReset(String rawEmail) {
-        Instant now = clock.instant();
         String canonicalEmail = EmailCanonicalizer.canonicalize(rawEmail);
 
-        var user = userRepository.findByEmail(canonicalEmail).orElse(null);
+        var user = userRepository.findByEmailForUpdate(canonicalEmail).orElse(null);
         if (user == null || !user.isActive()) {
             return;
         }
+        Instant now = clock.instant();
 
-        String rawToken = tokenHasher.generateOpaqueToken();
-        resetTokenRepository.save(PasswordResetToken.issue(
-                user.getId(), tokenHasher.hash(rawToken), now.plus(properties.passwordReset().ttl())));
+        // Coalescer antes de limitar: ninguna petición de terceros revoca ni prolonga el enlace vivo.
+        if (issuancePolicy.hasOutstandingReset(user.getId(), now)
+                || !issuancePolicy.allowReset(user.getId())) {
+            return;
+        }
+        resetTokenRepository.revokeUnusedByUserId(user.getId(), now);
+        linkIssuer.issue(user, IdentityEmailPurpose.PASSWORD_RESET, now.plus(properties.passwordReset().ttl()));
     }
 
     /**
@@ -139,9 +148,9 @@ public class PasswordService {
             throw new InvalidTokenException();
         }
 
-        User user = userRepository.findById(token.getUserId()).orElseThrow(InvalidTokenException::new);
+        User user = userRepository.findByIdForUpdate(token.getUserId()).orElseThrow(InvalidTokenException::new);
         user.changePasswordHash(passwordEncoder.encode(newPassword));
-        if (resetTokenRepository.consumeAtomically(tokenHash, now) != 1) {
+        if (resetTokenRepository.consumeAtomically(tokenHash, clock.instant()) != 1) {
             throw new InvalidTokenException();
         }
         sessionService.revokeAllSessions(user.getId());

@@ -1,5 +1,7 @@
 package com.dentalclinic.clinic.application;
 
+import java.time.Clock;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
@@ -25,15 +27,30 @@ import com.dentalclinic.identity.domain.exception.NotFoundException;
 public class DentistService {
 
     private final DentistRepository dentistRepository;
+    private final Clock clock;
 
-    public DentistService(DentistRepository dentistRepository) {
+    public DentistService(DentistRepository dentistRepository, Clock clock) {
         this.dentistRepository = dentistRepository;
+        this.clock = clock;
     }
 
     @Transactional
     public Dentist createForUser(Long userId, DentistData data) {
         return dentistRepository.save(Dentist.create(userId, data.firstName(), data.lastName(),
                 data.phone(), data.specialty(), data.licenseNumber(), data.publicInfo(), data.photoUrl()));
+    }
+
+    /**
+     * Edición administrativa del perfil profesional de una cuenta (RF-PR-05, Fase 8A).
+     *
+     * @throws NotFoundException si la cuenta no tiene perfil profesional
+     */
+    @Transactional
+    public Dentist updateProfileForUser(Long userId, DentistData data) {
+        Dentist dentist = getByUserId(userId);
+        dentist.updateProfile(data.firstName(), data.lastName(), data.phone(), data.specialty(),
+                data.licenseNumber(), data.publicInfo(), data.photoUrl(), clock.instant());
+        return dentistRepository.save(dentist);
     }
 
     @Transactional(readOnly = true)

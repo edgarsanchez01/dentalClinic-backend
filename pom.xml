@@ -22,6 +22,8 @@
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <testcontainers.version>1.21.4</testcontainers.version>
+        <!-- Override per invocation; never count accumulated reports as a new run. -->
+        <dentalclinic.test.reportsDirectory>${project.build.directory}/surefire-reports</dentalclinic.test.reportsDirectory>
         <!--
           Arquitectura.md 5.1 nombra "JWT (jjwt o libreria equivalente)". Se fija
           la linea 0.12.x, que es la estable y madura de jjwt.
@@ -103,6 +105,17 @@
             <optional>true</optional>
         </dependency>
 
+        <!--
+          Cliente SMTP (Adaptador de canal EMAIL, Architecture.md 9.2/9.5). Solo se
+          instancia cuando `dentalclinic.communication.email.enabled=true` y el
+          entorno define `spring.mail.host` (via SPRING_MAIL_HOST). Sin esa
+          configuracion explicita no hay adaptador y el dispatcher no envia nada.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-mail</artifactId>
+        </dependency>
+
         <!-- JUnit 5 + Spring Boot Test (Architecture.md 5.1). -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -135,6 +148,13 @@
 
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <reportsDirectory>${dentalclinic.test.reportsDirectory}</reportsDirectory>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

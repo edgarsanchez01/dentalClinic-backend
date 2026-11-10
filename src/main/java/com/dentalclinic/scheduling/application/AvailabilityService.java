@@ -23,7 +23,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.dentalclinic.clinic.application.ClinicService;
 import com.dentalclinic.clinic.domain.Clinic;
+import com.dentalclinic.clinic.domain.Dentist;
 import com.dentalclinic.clinic.infrastructure.repository.DentistRepository;
+import com.dentalclinic.identity.application.UserService;
 import com.dentalclinic.identity.domain.exception.NotFoundException;
 import com.dentalclinic.scheduling.api.dto.AvailabilityResponse;
 import com.dentalclinic.scheduling.api.dto.AvailabilitySlot;
@@ -69,6 +71,7 @@ public class AvailabilityService {
     private final DentistScheduleExceptionRepository dentistExceptionRepository;
     private final DentistTimeOffRepository timeOffRepository;
     private final AppointmentOccupancyReader occupancyReader;
+    private final UserService userService;
     private final Clock clock;
 
     public AvailabilityService(ClinicService clinicService, DentistRepository dentistRepository,
@@ -77,7 +80,7 @@ public class AvailabilityService {
             DentistScheduleRepository dentistScheduleRepository, DentistBreakRepository dentistBreakRepository,
             DentistScheduleExceptionRepository dentistExceptionRepository,
             DentistTimeOffRepository timeOffRepository, AppointmentOccupancyReader occupancyReader,
-            Clock clock) {
+            UserService userService, Clock clock) {
         this.clinicService = clinicService;
         this.dentistRepository = dentistRepository;
         this.clinicScheduleRepository = clinicScheduleRepository;
@@ -88,16 +91,34 @@ public class AvailabilityService {
         this.dentistExceptionRepository = dentistExceptionRepository;
         this.timeOffRepository = timeOffRepository;
         this.occupancyReader = occupancyReader;
+        this.userService = userService;
         this.clock = clock;
     }
 
+    /** Disponibilidad para una reserva nueva: un profesional inactivo no se ofrece (H-A15). */
     @Transactional(readOnly = true)
     public AvailabilityResponse compute(Long dentistId, LocalDate from, LocalDate to, int durationMinutes) {
+        return compute(dentistId, from, to, durationMinutes, false);
+    }
+
+    /**
+     * @param allowInactive si {@code true}, permite calcular la disponibilidad de un profesional
+     *     inactivo. Solo se usa al reprogramar una cita ya existente (cuyo dentista puede haberse
+     *     desactivado después); en ese caso el backend sí acepta el nuevo horario. Para reservas
+     *     nuevas ({@code allowInactive=false}) un inactivo responde 404, en coherencia con
+     *     {@code AppointmentService}, que rechaza crear citas con profesionales inactivos.
+     */
+    @Transactional(readOnly = true)
+    public AvailabilityResponse compute(Long dentistId, LocalDate from, LocalDate to, int durationMinutes,
+            boolean allowInactive) {
         if (durationMinutes <= 0) {
             throw new InvalidScheduleException("La duración debe ser mayor que cero.");
         }
-        dentistRepository.findById(dentistId)
+        Dentist dentist = dentistRepository.findById(dentistId)
                 .orElseThrow(() -> new NotFoundException("No encontramos el dentista indicado."));
+        if (!allowInactive && !userService.isActive(dentist.getUserId())) {
+            throw new NotFoundException("No encontramos el dentista indicado.");
+        }
         Clinic clinic = clinicService.get();
         Long clinicId = clinic.getId();
         ZoneId zone = ZoneId.of(clinic.getTimezone());

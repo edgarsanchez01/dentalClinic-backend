@@ -79,7 +79,8 @@ public class AppointmentCreateCoordinator {
         try {
             return appointmentService.create(toData(request), actor, idempotencyKey, hash)
                     .response();
-        } catch (DataIntegrityViolationException | ScheduleConflictException ex) {
+        } catch (DataIntegrityViolationException | ScheduleConflictException | InvalidScheduleException
+                | com.dentalclinic.catalog.domain.ServiceUnavailableException ex) {
             HttpIdempotency winner = idempotencyRepository
                     .findByIdentity(actor.userId(), OPERATION, idempotencyKey)
                     .orElse(null);
@@ -91,6 +92,8 @@ public class AppointmentCreateCoordinator {
                 // Sin respuesta idempotente, se conserva la explicación original del negocio.
                 throw conflict;
             }
+            if (ex instanceof InvalidScheduleException invalid) throw invalid;
+            if (ex instanceof com.dentalclinic.catalog.domain.ServiceUnavailableException unavailable) throw unavailable;
             // No es el choque de clave de petición: es la EXCLUDE de slot u otra constraint real.
             throw new ScheduleConflictException("Ese horario ya fue tomado. Selecciona otro horario.");
         }
@@ -118,6 +121,6 @@ public class AppointmentCreateCoordinator {
 
     private static AppointmentData toData(CreateAppointmentRequest request) {
         return new AppointmentData(request.patientId(), request.dentistId(), request.startAt(),
-                request.endAt(), request.reason(), request.notes());
+                request.endAt(), request.reason(), request.notes(), request.serviceId());
     }
 }

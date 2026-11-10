@@ -1,6 +1,5 @@
 package com.dentalclinic.identity.application;
 
-import java.time.Instant;
 import java.time.LocalDate;
 
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -20,8 +19,8 @@ import com.dentalclinic.patient.application.PatientService.PatientData;
  * Registro publico de paciente (RF-IA-05/06, §6.5.1).
  *
  * <p>Crea, en <strong>una sola transaccion</strong>, la cuenta {@code User(role=PATIENT,
- * active=true)} y su {@code Patient}. Si algo falla, la transaccion revierte ambos: no puede quedar
- * una cuenta sin paciente ni un paciente sin cuenta.
+ * active=true)}, su {@code Patient} y su sesión autenticada. Si algo falla, la transacción
+ * revierte los tres: no puede quedar una cuenta parcial ni una sesión de un alta fallida.
  *
  * <p>El rol <strong>nunca</strong> procede del cuerpo de la peticion: aqui se fija a
  * {@link Role#PATIENT}. No se crea verificacion de email (no existe en el producto).
@@ -36,17 +35,20 @@ public class RegistrationService {
     private final UserRepository userRepository;
     private final PatientService patientService;
     private final PasswordEncoder passwordEncoder;
+    private final SessionService sessionService;
 
     public RegistrationService(UserRepository userRepository,
                                PatientService patientService,
-                               PasswordEncoder passwordEncoder) {
+                                PasswordEncoder passwordEncoder,
+                                SessionService sessionService) {
         this.userRepository = userRepository;
         this.patientService = patientService;
         this.passwordEncoder = passwordEncoder;
+        this.sessionService = sessionService;
     }
 
     @Transactional
-    public RegisteredUser register(RegistrationData data) {
+    public IssuedSession register(RegistrationData data) {
         String email = EmailCanonicalizer.canonicalize(data.email());
         if (userRepository.existsByEmail(email)) {
             throw new EmailAlreadyRegisteredException();
@@ -57,9 +59,10 @@ public class RegistrationService {
                 User.create(email, passwordEncoder.encode(data.password()), Role.PATIENT));
         var patient = patientService.createForUser(user.getId(), new PatientData(
                 data.firstName(), data.lastName(), null, data.phone(), data.birthDate(), null));
+        patientService.requireMedicalOnboarding(patient.getId());
 
-        return new RegisteredUser(user.getId(), user.getEmail(), user.getRole(), user.isActive(),
-                user.getCreatedAt(), patient.getId());
+        // Misma emisión que login; un fallo de sesión también revierte User y Patient.
+        return sessionService.openRegistrationSession(user);
     }
 
     /** Datos de entrada del registro publico. El rol no aparece: se fija en el servicio. */
@@ -67,8 +70,4 @@ public class RegistrationService {
                                    String phone, LocalDate birthDate) {
     }
 
-    /** Resultado del registro, con el id del paciente creado. */
-    public record RegisteredUser(Long userId, String email, Role role, boolean active,
-                                 Instant createdAt, Long patientId) {
-    }
 }

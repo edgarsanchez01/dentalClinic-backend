@@ -21,7 +21,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import com.dentalclinic.appointment.api.dto.AppointmentEventView;
 import com.dentalclinic.appointment.api.dto.AppointmentResponse;
 import com.dentalclinic.appointment.domain.Appointment;
 import com.dentalclinic.appointment.domain.AppointmentEvent;
@@ -81,6 +80,9 @@ public class AppointmentService {
     private final UserService userService;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final com.dentalclinic.catalog.application.ServiceCatalogService catalog;
+    private final AppointmentCompletionParticipant completionParticipant;
+    private final OperationIdempotencyStore operationIdempotency;
 
     public AppointmentService(AppointmentRepository appointmentRepository,
             AppointmentEventRepository appointmentEventRepository,
@@ -88,7 +90,10 @@ public class AppointmentService {
             DentistService dentistService, ClinicService clinicService,
             AvailabilityService availabilityService,
             AppointmentCommunicationPlanner communications, UserService userService,
-            ObjectMapper objectMapper, Clock clock) {
+            ObjectMapper objectMapper, Clock clock,
+            com.dentalclinic.catalog.application.ServiceCatalogService catalog,
+            AppointmentCompletionParticipant completionParticipant,
+            OperationIdempotencyStore operationIdempotency) {
         this.appointmentRepository = appointmentRepository;
         this.appointmentEventRepository = appointmentEventRepository;
         this.httpIdempotencyRepository = httpIdempotencyRepository;
@@ -100,6 +105,9 @@ public class AppointmentService {
         this.userService = userService;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.catalog = catalog;
+        this.completionParticipant = completionParticipant;
+        this.operationIdempotency = operationIdempotency;
     }
 
     /**
@@ -115,6 +123,7 @@ public class AppointmentService {
         ZoneId zone = ZoneId.of(clinic.getTimezone());
 
         assertCanCreateFor(actor, data);
+        patientService.assertMedicalBookingAllowed(actor);
         Patient patient = patientService.get(data.patientId());
         if (!patient.isActive()) {
             throw new ScheduleConflictException("El paciente está dado de baja; no se pueden agendar citas.");
@@ -123,13 +132,18 @@ public class AppointmentService {
         requireActiveProfessional(dentist);
 
         validateRange(data.startAt(), data.endAt());
+        if (data.serviceId() == null) throw new InvalidScheduleException("Selecciona un servicio activo.");
+        var service = catalog.resolveForBooking(data.serviceId());
+        requireDuration(data.startAt(), data.endAt(), service.durationMinutes());
         validateBookingWindow(now, clinic, zone, data.startAt(), actor.role());
 
         availabilityService.assertBookable(data.dentistId(), data.startAt(), data.endAt(), null);
 
-        Appointment appointment = appointmentRepository.save(Appointment.create(
+        Appointment appointment = Appointment.create(
                 data.patientId(), data.dentistId(), actor.userId(), data.startAt(), data.endAt(),
-                durationMinutes(data.startAt(), data.endAt()), data.reason(), data.notes()));
+                service.durationMinutes(), data.reason(), data.notes());
+        appointment.captureService(service.id(), service.name(), service.description(), service.referencePrice(), service.durationMinutes());
+        appointment = appointmentRepository.save(appointment);
 
         AppointmentEvent event = AppointmentEvent.create(appointment.getId(),
                 AppointmentEventType.APPOINTMENT_CREATED, actor.userId(),
@@ -139,6 +153,11 @@ public class AppointmentService {
         AppointmentResponse response = toResponse(appointment, patient, dentist, actor);
         Map<String, Object> body = objectMapper.convertValue(response, new TypeReference<>() {
         });
+        // JSONB maps otherwise deserialize decimal prices as Double on replay. Store the lexeme
+        // internally; AppointmentServiceSnapshot restores BigDecimal and the HTTP DTO stays numeric.
+        Map<String, Object> serviceBody = objectMapper.convertValue(response.service(), new TypeReference<>() { });
+        serviceBody.put("referencePrice", response.service().referencePrice().toPlainString());
+        body.put("service", serviceBody);
         httpIdempotencyRepository.save(HttpIdempotency.create(actor.userId(), CREATE_OPERATION,
                 idempotencyKey, requestHash, HttpStatus.CREATED.value(), body));
 
@@ -146,20 +165,37 @@ public class AppointmentService {
         return new CreatedAppointment(response);
     }
 
+    /**
+     * Cita concreta. Para un {@code DENTIST} solo su propia cita asignada; para un {@code PATIENT}
+     * solo la suya; {@code OWNER} y {@code RECEPTIONIST} mantienen alcance global.
+     *
+     * <p>El requisito de alcance que <strong>no depende del recurso</strong> —que el
+     * {@code DENTIST} tenga perfil profesional— se comprueba <strong>antes</strong> de resolver la
+     * cita: una identidad sin perfil no puede demostrar pertenencia y tampoco debe poder
+     * distinguir un identificador existente de uno inexistente (403 en ambos casos, nunca 404).
+     */
     @Transactional(readOnly = true)
     public Appointment get(Long id, AuthenticatedUser actor) {
+        Long ownDentistId = requireProfessionalScope(actor);
         Appointment appointment = appointmentRepository.findById(id)
                 .orElseThrow(NotFoundException::new);
-        requireVisibleTo(appointment, actor);
+        requireVisibleTo(appointment, actor, ownDentistId);
         return appointment;
     }
 
-    /** Auditoría append-only de una cita (RF-AP-05/15), con la misma regla de visibilidad. */
+    /**
+     * Auditoría append-only de una cita (RF-AP-05/15), con la misma regla de visibilidad que la
+     * cita: un {@code DENTIST} solo lee los eventos de las citas asignadas a su perfil.
+     *
+     * <p>Como en {@link #get(Long, AuthenticatedUser)}, la ausencia de perfil profesional se
+     * comprueba antes de resolver la cita: la respuesta no depende de si la cita existe.
+     */
     @Transactional(readOnly = true)
     public List<AppointmentEvent> events(Long id, AuthenticatedUser actor) {
+        Long ownDentistId = requireProfessionalScope(actor);
         Appointment appointment = appointmentRepository.findById(id)
                 .orElseThrow(NotFoundException::new);
-        requireVisibleTo(appointment, actor);
+        requireVisibleTo(appointment, actor, ownDentistId);
         return appointmentEventRepository.findByAppointmentIdOrderByCreatedAtAscIdAsc(id);
     }
 
@@ -170,6 +206,11 @@ public class AppointmentService {
     /**
      * Agenda (§17.5) con filtros opcionales. Para un PATIENT el filtro de paciente se fuerza a su
      * propio {@code patientId}: nunca ve citas ajenas (matriz §7.4, {@code SELF_READ}).
+     *
+     * <p>Para un {@code DENTIST} el filtro de profesional se fuerza a su propio perfil
+     * ({@code UX-05B.1}): el {@code dentistId} que llegue del cliente <strong>se ignora</strong> y
+     * se resuelve desde la identidad autenticada. Sin perfil profesional el listado es vacío
+     * (fail-closed): una identidad sin perfil no puede demostrar pertenencia.
      *
      * <p>Los filtros se componen con una {@code Specification} y no con parámetros anulables en
      * JPQL: {@code :param IS NULL} deja parámetros sin tipo que PostgreSQL rechaza (42P18) para
@@ -185,6 +226,13 @@ public class AppointmentService {
                 return Page.empty(pageable);
             }
             patientId = own;
+        }
+        if (actor.role() == Role.DENTIST) {
+            Long own = dentistService.dentistIdFor(actor.userId()).orElse(null);
+            if (own == null) {
+                return Page.empty(pageable);
+            }
+            dentistId = own;
         }
         return appointmentRepository.findAll(filtro(dentistId, patientId, status, from, to),
                 pageable);
@@ -215,10 +263,11 @@ public class AppointmentService {
 
     @Transactional
     public AppointmentResponse reschedule(Long id, AuthenticatedUser actor, RescheduleData data) {
-        Appointment appointment = appointmentRepository.findById(id)
+        Appointment appointment = appointmentRepository.findByIdForUpdate(id)
                 .orElseThrow(NotFoundException::new);
         requireScheduled(appointment);
         assertCanControl(appointment, actor);
+        patientService.assertMedicalBookingAllowed(actor);
         if (appointment.getOccurrenceVersion() != data.expectedOccurrenceVersion()) {
             throw new ScheduleConflictException(
                     "La cita fue modificada por otra persona; recarga la vista para ver la versión actual.");
@@ -228,24 +277,31 @@ public class AppointmentService {
         Clinic clinic = clinicService.get();
         ZoneId zone = ZoneId.of(clinic.getTimezone());
         validateRange(data.startAt(), data.endAt());
+        requireDuration(data.startAt(), data.endAt(), appointment.getDurationMinutes());
         validateBookingWindow(now, clinic, zone, data.startAt(), actor.role());
         availabilityService.assertBookable(appointment.getDentistId(), data.startAt(),
                 data.endAt(), appointment.getId());
 
         Patient patient = patientService.get(appointment.getPatientId());
         Dentist dentist = dentistService.get(appointment.getDentistId());
+        Instant previousStart = appointment.getStartAt();
+        Instant previousEnd = appointment.getEndAt();
         appointment.reschedule(data.startAt(), data.endAt(),
                 durationMinutes(data.startAt(), data.endAt()), now);
+        communications.supersedePendingReminders(appointment.getId(), appointment.getOccurrenceVersion() - 1, now);
         appointmentEventRepository.save(AppointmentEvent.create(appointment.getId(),
                 AppointmentEventType.APPOINTMENT_RESCHEDULED, actor.userId(),
-                appointment.getOccurrenceVersion(), null));
-        communications.rescheduled(appointment, patient, dentist, actor.userId(), zone, now);
+                appointment.getOccurrenceVersion(), Map.of(
+                        "previousStartAt", previousStart.toString(), "previousEndAt", previousEnd.toString(),
+                        "startAt", appointment.getStartAt().toString(), "endAt", appointment.getEndAt().toString(),
+                        "timezone", zone.getId())));
+        communications.rescheduled(appointment, patient, dentist, appointment.getCreatedByUserId(), zone, now);
         return toResponse(appointment, patient, dentist, actor);
     }
 
     @Transactional
     public AppointmentResponse cancel(Long id, AuthenticatedUser actor) {
-        Appointment appointment = appointmentRepository.findById(id)
+        Appointment appointment = appointmentRepository.findByIdForUpdate(id)
                 .orElseThrow(NotFoundException::new);
         requireScheduled(appointment);
         assertCanControl(appointment, actor);
@@ -260,37 +316,45 @@ public class AppointmentService {
         Patient patient = patientService.get(appointment.getPatientId());
         Dentist dentist = dentistService.get(appointment.getDentistId());
         appointment.cancel(now);
+        communications.supersedePendingReminders(appointment.getId(), appointment.getOccurrenceVersion(), now);
         appointmentEventRepository.save(AppointmentEvent.create(appointment.getId(),
                 AppointmentEventType.APPOINTMENT_CANCELLED, actor.userId(),
                 appointment.getOccurrenceVersion(), null));
-        communications.cancelled(appointment, patient, dentist, actor.userId(),
+        communications.cancelled(appointment, patient, dentist, appointment.getCreatedByUserId(),
                 ZoneId.of(clinic.getTimezone()));
         return toResponse(appointment, patient, dentist, actor);
     }
 
+    /** T4.4: cierre directo de SCHEDULED, sin llegada/inicio ni payload clínico. */
     @Transactional
     public AppointmentResponse complete(Long id, AuthenticatedUser actor) {
-        Appointment appointment = appointmentRepository.findById(id)
-                .orElseThrow(NotFoundException::new);
-        requireScheduled(appointment);
-        authorizeProfessionalTrajectory(appointment, actor);
-        Instant now = clock.instant();
-        Clinic clinic = clinicService.get();
-        appointment.complete(now);
-        appointmentEventRepository.save(AppointmentEvent.create(appointment.getId(),
-                AppointmentEventType.APPOINTMENT_COMPLETED, actor.userId(),
-                appointment.getOccurrenceVersion(), null));
+        Appointment appointment = completionParticipant.complete(id, actor);
         Patient patient = patientService.get(appointment.getPatientId());
-        communications.notifyPatientInApp(appointment, patient, "Consulta completada",
-                "Gracias por tu visita. Registramos tu consulta como completada.");
         Dentist dentist = dentistService.get(appointment.getDentistId());
         return toResponse(appointment, patient, dentist, actor);
+    }
+
+    @Transactional(isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+    public AppointmentResponse complete(Long id, AuthenticatedUser actor, int expectedVersion, String key) {
+        completionParticipant.requireCheckoutScope(actor);
+        String operation = "APPOINTMENT_COMPLETE";
+        String hash = operationIdempotency.lock(actor, operation, key,
+                Map.of("version", 1, "appointmentId", id, "expectedOccurrenceVersion", expectedVersion));
+        // Reauthorize against the currently assigned professional even on replay.
+        completionParticipant.lockForCheckout(id, actor);
+        var replay = operationIdempotency.replay(actor, operation, key, hash, AppointmentResponse.class);
+        if (replay != null) return replay;
+        Appointment appointment = completionParticipant.completeVersioned(id, actor, expectedVersion);
+        var response = toResponse(appointment, patientService.get(appointment.getPatientId()),
+                dentistService.get(appointment.getDentistId()), actor);
+        operationIdempotency.remember(actor, operation, key, hash, response);
+        return response;
     }
 
     /** No-show: solo OWNER|RECEPTIONIST (matriz §17.5) y solo desde que la cita ya comenzó (A-18). */
     @Transactional
     public AppointmentResponse markNoShow(Long id, AuthenticatedUser actor) {
-        Appointment appointment = appointmentRepository.findById(id)
+        Appointment appointment = appointmentRepository.findByIdForUpdate(id)
                 .orElseThrow(NotFoundException::new);
         requireScheduled(appointment);
         if (actor.role() == Role.PATIENT || actor.role() == Role.DENTIST) {
@@ -303,6 +367,7 @@ public class AppointmentService {
                     "Aún no puede declararse ausencia: la cita todavía no comenzó.");
         }
         appointment.markNoShow(now);
+        communications.supersedePendingReminders(appointment.getId(), appointment.getOccurrenceVersion(), now);
         appointmentEventRepository.save(AppointmentEvent.create(appointment.getId(),
                 AppointmentEventType.APPOINTMENT_NO_SHOW, actor.userId(),
                 appointment.getOccurrenceVersion(), null));
@@ -313,48 +378,6 @@ public class AppointmentService {
                 "No registramos tu asistencia a la cita del " + fecha + ". Si tienes dudas, contáctanos.");
         Dentist dentist = dentistService.get(appointment.getDentistId());
         return toResponse(appointment, patient, dentist, actor);
-    }
-
-    /**
-     * Llegada del paciente (P-01). Solo el profesional asignado la registra y una sola vez por
-     * cita: el índice parcial UNIQUE de V006 convierte el duplicado en 409 (A-09/D-F6-24.b).
-     */
-    @Transactional
-    public AppointmentEventView arrival(Long id, AuthenticatedUser actor) {
-        Appointment appointment = appointmentRepository.findById(id)
-                .orElseThrow(NotFoundException::new);
-        requireScheduled(appointment);
-        authorizeProfessionalTrajectory(appointment, actor);
-        AppointmentEvent event = recordEvent(appointment,
-                AppointmentEventType.PATIENT_ARRIVED, actor);
-        Patient patient = patientService.get(appointment.getPatientId());
-        Dentist dentist = dentistService.get(appointment.getDentistId());
-        communications.notifyDentistInApp(appointment, dentist, "El paciente llegó",
-                patient.getFirstName() + " " + patient.getLastName() + " llegó para su cita.");
-        return toEventView(event);
-    }
-
-    /** Comienzo del tratamiento. Mismas reglas y deduplicación que la llegada. */
-    @Transactional
-    public AppointmentEventView start(Long id, AuthenticatedUser actor) {
-        Appointment appointment = appointmentRepository.findById(id)
-                .orElseThrow(NotFoundException::new);
-        requireScheduled(appointment);
-        authorizeProfessionalTrajectory(appointment, actor);
-        AppointmentEvent event = recordEvent(appointment,
-                AppointmentEventType.APPOINTMENT_STARTED, actor);
-        Patient patient = patientService.get(appointment.getPatientId());
-        Dentist dentist = dentistService.get(appointment.getDentistId());
-        communications.notifyDentistInApp(appointment, dentist, "Cita en curso",
-                "Comenzaste la cita con " + patient.getFirstName() + " "
-                        + patient.getLastName() + ".");
-        return toEventView(event);
-    }
-
-    private AppointmentEvent recordEvent(Appointment appointment, AppointmentEventType type,
-                                         AuthenticatedUser actor) {
-        return appointmentEventRepository.save(AppointmentEvent.create(appointment.getId(), type,
-                actor.userId(), appointment.getOccurrenceVersion(), null));
     }
 
     @Transactional(readOnly = true)
@@ -419,15 +442,6 @@ public class AppointmentService {
         }
     }
 
-    /** Complejidad profesional (llegada/comienzo/finalización): solo el asignado, DENTIST u OWNER. */
-    private void authorizeProfessionalTrajectory(Appointment appointment, AuthenticatedUser actor) {
-        if (actor.role() != Role.DENTIST && actor.role() != Role.OWNER) {
-            throw new ForbiddenOperationException(
-                    "Solo el profesional asignado o la administración registran la llegada, el comienzo o la finalización.");
-        }
-        requireAssignedProfessional(appointment, actor);
-    }
-
     private void requireAssignedProfessional(Appointment appointment, AuthenticatedUser actor) {
         Long myDentistId = dentistService.dentistIdFor(actor.userId())
                 .orElseThrow(() -> new ForbiddenOperationException(
@@ -438,13 +452,77 @@ public class AppointmentService {
         }
     }
 
-    private void requireVisibleTo(Appointment appointment, AuthenticatedUser actor) {
-        if (actor.role() == Role.PATIENT) {
-            Long own = patientService.findPatientIdForUser(actor.userId()).orElse(null);
-            if (own == null || !own.equals(appointment.getPatientId())) {
-                throw new NotFoundException();
+    /**
+     * Visibilidad de una cita concreta para el actor.
+     *
+     * <ul>
+     *   <li>{@code PATIENT}: solo la propia ({@link NotFoundException} si no).</li>
+     *   <li>{@code DENTIST}: solo la asignada a su perfil profesional ({@link NotFoundException}
+     *       si es de otro: no se revela la existencia del recurso ajeno). Una identidad
+     *       {@code DENTIST} sin perfil profesional no puede demostrar pertenencia y se rechaza con
+     *       {@link ForbiddenOperationException} <strong>antes</strong> de resolver la cita
+     *       ({@link #requireProfessionalScope}).</li>
+     *   <li>{@code OWNER} y {@code RECEPTIONIST}: alcance global (operación administrativa).</li>
+     * </ul>
+     *
+     * @param ownDentistId perfil profesional ya resuelto del {@code DENTIST}; {@code null} para el
+     *                     resto de roles, cuyo alcance no depende de un perfil
+     */
+    private void requireVisibleTo(Appointment appointment, AuthenticatedUser actor, Long ownDentistId) {
+        switch (actor.role()) {
+            case PATIENT -> {
+                Long own = patientService.findPatientIdForUser(actor.userId()).orElse(null);
+                if (own == null || !own.equals(appointment.getPatientId())) {
+                    throw new NotFoundException();
+                }
+            }
+            case DENTIST -> {
+                if (!ownDentistId.equals(appointment.getDentistId())) {
+                    throw new NotFoundException();
+                }
+            }
+            default -> {
+                // OWNER y RECEPTIONIST mantienen alcance global sobre la agenda.
             }
         }
+    }
+
+    /**
+     * Requisito de alcance del {@code DENTIST} que no depende de la cita consultada: debe tener
+     * perfil profesional.
+     *
+     * <p>Se resuelve <strong>antes</strong> de cargar cualquier cita para que una identidad
+     * {@code DENTIST} sin perfil no pueda enumerar la agenda probando identificadores: un
+     * identificador existente y uno inexistente responden los dos <strong>403</strong>, y la
+     * respuesta no revela si la cita existe.
+     *
+     * @return el identificador del perfil profesional del {@code DENTIST}; {@code null} para el
+     *         resto de roles, cuyo alcance no depende de un perfil
+     * @throws ForbiddenOperationException si la identidad es {@code DENTIST} y no tiene perfil
+     */
+    private Long requireProfessionalScope(AuthenticatedUser actor) {
+        if (actor.role() != Role.DENTIST) {
+            return null;
+        }
+        return dentistService.dentistIdFor(actor.userId()).orElseThrow(() ->
+                new ForbiddenOperationException("Tu cuenta no tiene un perfil de dentista."));
+    }
+
+    /**
+     * Resolución de una cita como <strong>referencia entre módulos</strong> (RF-TR-05 y validaciones
+     * financieras).
+     *
+     * <p><strong>No aplica el alcance de agenda del {@code DENTIST}.</strong> El expediente clínico
+     * es longitudinal ({@code P-05}): el personal clínico escribe sobre cualquier paciente y puede
+     * vincular un tratamiento a una cita del mismo paciente aunque la haya atendido otro
+     * profesional. Por eso el filtro por profesional pertenece a la agenda
+     * ({@link #get(Long, AuthenticatedUser)}, {@link #events(Long, AuthenticatedUser)},
+     * {@link #list}) y no a la referencia clínica. Aquí solo se comprueba la existencia; la
+     * pertenencia al paciente la verifica quien llama.
+     */
+    @Transactional(readOnly = true)
+    public Appointment resolveReference(Long id) {
+        return appointmentRepository.findById(id).orElseThrow(NotFoundException::new);
     }
 
     private void requireScheduled(Appointment appointment) {
@@ -506,6 +584,12 @@ public class AppointmentService {
         return (int) minutes;
     }
 
+    private static void requireDuration(Instant start, Instant end, int minutes) {
+        if (!start.plus(Duration.ofMinutes(minutes)).equals(end)) {
+            throw new InvalidScheduleException("El intervalo debe conservar la duración del servicio o de la cita histórica: " + minutes + " minutos.");
+        }
+    }
+
     private static String fechaHora(Instant instant, ZoneId zone) {
         return FECHA_HORA.format(instant.atZone(zone));
     }
@@ -516,18 +600,14 @@ public class AppointmentService {
                 patient.getLastName(), patient.getUserId(), a.getDentistId(), dentist.getFirstName(),
                 dentist.getLastName(), a.getStartAt(), a.getEndAt(), a.getDurationMinutes(),
                 a.getStatus(), a.getOccurrenceVersion(), a.getCreatedByUserId(), a.getReason(),
-                a.getNotes(), a.getCompletedAt(), a.getCreatedAt(), a.getUpdatedAt())
+                a.getNotes(), a.getCompletedAt(), a.getCreatedAt(), a.getUpdatedAt(),
+                a.getServiceId() == null ? null : new com.dentalclinic.appointment.api.dto.AppointmentServiceSnapshot(
+                        a.getServiceId(), a.getServiceName(), a.getServiceDescription(), a.getServiceReferencePrice(), a.getServiceDurationMinutes()))
                 .forRole(actor.role());
     }
 
-    private static AppointmentEventView toEventView(AppointmentEvent event) {
-        return new AppointmentEventView(event.getId(), event.getEventType(),
-                event.getActorUserId(), event.getOccurrenceVersion(), event.getMetadata(),
-                event.getCreatedAt());
-    }
-
     public record AppointmentData(Long patientId, Long dentistId, Instant startAt, Instant endAt,
-                                  String reason, String notes) {
+                                  String reason, String notes, Long serviceId) {
     }
 
     public record RescheduleData(Instant startAt, Instant endAt, int expectedOccurrenceVersion) {

@@ -20,9 +20,9 @@ import jakarta.persistence.Table;
  * Auditoría append-only de una cita (RF-AP-05/15, Architecture.md §15.2).
  *
  * <p>No es estado: la cita vive en {@code Appointment}. La existencia de cada evento se decide en la
- * capa de aplicación (agendado, llegada, comienzo, reprogramado, etc.); solo {@code PATIENT_ARRIVED}
- * y {@code APPOINTMENT_STARTED} están acotados a "uno por cita" también por índice parcial UNIQUE
- * (A-09/D-F6-24.b) para que duplicarlos sea, además, 409 por violación de constraint.
+ * capa de aplicación (agendado, reprogramado, completado, etc.). Los tipos históricos
+ * {@code PATIENT_ARRIVED} y {@code APPOINTMENT_STARTED} conservan el índice parcial UNIQUE
+ * (A-09/D-F6-24.b) por compatibilidad; T4.4 no genera nuevas llegadas ni inicios.
  */
 @Entity
 @Table(name = "appointment_event")
@@ -40,6 +40,7 @@ public class AppointmentEvent {
     private AppointmentEventType eventType;
 
     @Column(name = "actor_user_id", nullable = false)
+    // REMINDER_* automático: referencia técnica al creador; metadata identifica que no es acción humana.
     private Long actorUserId;
 
     @Column(name = "occurrence_version", nullable = false)

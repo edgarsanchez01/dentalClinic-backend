@@ -85,6 +85,24 @@ public class Dentist {
                 photoUrl);
     }
 
+    /**
+     * Edición administrativa del perfil profesional (RF-PR-05, Fase 8A). Sustituye los datos
+     * profesionales por completo (semántica PUT: {@code null} limpia los opcionales). El email y el
+     * rol viven en {@code User} y no se tocan aquí: la identidad histórica asociada a citas y
+     * tratamientos queda estable.
+     */
+    public void updateProfile(String firstName, String lastName, String phone, String specialty,
+            String licenseNumber, String publicInfo, String photoUrl, Instant now) {
+        this.firstName = Objects.requireNonNull(firstName, "firstName es obligatorio");
+        this.lastName = Objects.requireNonNull(lastName, "lastName es obligatorio");
+        this.phone = Objects.requireNonNull(phone, "phone es obligatorio");
+        this.specialty = specialty;
+        this.licenseNumber = licenseNumber;
+        this.publicInfo = publicInfo;
+        this.photoUrl = photoUrl;
+        this.updatedAt = Objects.requireNonNull(now, "now es obligatorio");
+    }
+
     public Long getId() {
         return id;
     }

@@ -21,5 +21,11 @@ public record UserDto(
         boolean active,
         Instant createdAt,
         Long patientId,
-        Long dentistId) {
+        Long dentistId,
+        com.dentalclinic.patient.application.PatientService.MedicalOnboardingSummary medicalOnboarding) {
+
+    public UserDto(Long id, String email, Role role, boolean active, Instant createdAt,
+                   Long patientId, Long dentistId) {
+        this(id, email, role, active, createdAt, patientId, dentistId, null);
+    }
 }

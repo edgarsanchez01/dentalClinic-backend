@@ -33,7 +33,18 @@ public record ErrorResponse(
         String message,
         String path,
         Instant timestamp,
-        Map<String, String> fieldErrors) {
+        Map<String, String> fieldErrors,
+        String code) {
+
+    public ErrorResponse(int status, String error, String message, String path, Instant timestamp,
+                         Map<String, String> fieldErrors) {
+        this(status, error, message, path, timestamp, fieldErrors, null);
+    }
+
+    public ErrorResponse {
+        // El bearer de feedback viaja en el enlace: nunca reflejarlo en errores de seguridad.
+        if (path != null) path = path.replaceFirst("(/api/feedback/invitations)/.*", "$1/[redacted]");
+    }
 
     public static ErrorResponse of(int status, String error, String message, String path) {
         return new ErrorResponse(status, error, message, path, Instant.now(), null);

@@ -21,7 +21,7 @@ import jakarta.persistence.Table;
  *
  * <p><strong>Frontera F6↔F8:</strong> solo los tipos con comunicación ({@code CREATED},
  * {@code RESCHEDULED}, {@code CANCELLED}, {@code REMINDER}) generan intenciones; los avisos
- * in-app de completado/no-show/llegada/comienzo se insertan directo en {@code Notification} sin
+ * in-app de completado/no-show se insertan directo en {@code Notification} sin
  * intención. Lo garantiza también el CHECK {@code ci_event_check} de V006.
  *
  * <p>Invariantes (A-06) que el motor verifica: enlaces mutuamente excluyentes y por canal,

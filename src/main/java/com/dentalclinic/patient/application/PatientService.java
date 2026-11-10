@@ -72,7 +72,7 @@ public class PatientService {
 
     @Transactional
     public Patient update(Long id, PatientData data, Boolean active) {
-        Patient patient = get(id);
+        Patient patient = patientRepository.findByIdForUpdate(id).orElseThrow(NotFoundException::new);
         patient.update(
                 required(data.firstName(), "firstName"),
                 required(data.lastName(), "lastName"),
@@ -105,6 +105,38 @@ public class PatientService {
     public Optional<Patient> findByUserId(Long userId) {
         return patientRepository.findByUserId(userId);
     }
+
+    /** Serializes intake writes, including competing tabs, with administrative patient edits. */
+    @Transactional
+    public Patient lockForIntake(com.dentalclinic.identity.infrastructure.security.AuthenticatedUser actor) {
+        if (actor.role() != com.dentalclinic.identity.domain.Role.PATIENT)
+            throw new com.dentalclinic.identity.domain.exception.ForbiddenOperationException("Solo pacientes.");
+        return patientRepository.findByUserIdForUpdate(actor.userId()).orElseThrow(NotFoundException::new);
+    }
+
+    @Transactional
+    public void requireMedicalOnboarding(Long patientId) {
+        patientRepository.findByIdForUpdate(patientId).orElseThrow(NotFoundException::new)
+                .requireMedicalOnboarding();
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<MedicalOnboardingSummary> medicalOnboardingFor(Long userId) {
+        return patientRepository.findByUserId(userId).map(p -> new MedicalOnboardingSummary(
+                p.getMedicalOnboardingRequirement(), p.getMedicalOnboardingProgress(), p.isMedicalOnboardingPending()));
+    }
+
+    @Transactional(readOnly = true)
+    public void assertMedicalBookingAllowed(com.dentalclinic.identity.infrastructure.security.AuthenticatedUser actor) {
+        if (actor.role() == com.dentalclinic.identity.domain.Role.PATIENT) {
+            patientRepository.findByUserId(actor.userId()).ifPresent(p -> {
+                if (p.isMedicalOnboardingPending()) throw new com.dentalclinic.patient.domain.MedicalOnboardingRequiredException();
+            });
+        }
+    }
+
+    public record MedicalOnboardingSummary(com.dentalclinic.patient.domain.MedicalOnboardingRequirement requirement,
+            com.dentalclinic.patient.domain.MedicalOnboardingProgress progress, boolean pending) { }
 
     /**
      * Pacientes por id en un solo lote (para enriquecer agendas sin N+1). Nunca lanza por faltantes:

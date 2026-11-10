@@ -14,6 +14,14 @@ public interface PatientRepository extends JpaRepository<Patient, Long> {
 
     Optional<Patient> findByUserId(Long userId);
 
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT p FROM Patient p WHERE p.userId = :userId")
+    Optional<Patient> findByUserIdForUpdate(@Param("userId") Long userId);
+
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT p FROM Patient p WHERE p.id = :id")
+    Optional<Patient> findByIdForUpdate(@Param("id") Long id);
+
     /**
      * Listado con búsqueda incremental (RF-PA-06) y filtro de vigencia (RF-PA-03).
      *

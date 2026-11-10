@@ -7,6 +7,7 @@ import java.time.Instant;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
 
 import com.dentalclinic.identity.domain.EmailCanonicalizer;
 import com.dentalclinic.identity.domain.PasswordPolicy;
@@ -109,6 +110,15 @@ public class SessionService {
             throw new AccountInactiveException();
         }
         return openFamily(user, now);
+    }
+
+    /** Solo el alta recién validada, dentro de la transacción que crea User + Patient. */
+    @Transactional(propagation = Propagation.MANDATORY)
+    IssuedSession openRegistrationSession(User user) {
+        if (user.getRole() != com.dentalclinic.identity.domain.Role.PATIENT || !user.isActive()) {
+            throw new IllegalArgumentException("El registro requiere un paciente activo");
+        }
+        return openFamily(user, clock.instant());
     }
 
     /**

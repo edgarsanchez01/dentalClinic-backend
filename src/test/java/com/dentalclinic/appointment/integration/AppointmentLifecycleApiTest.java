@@ -8,10 +8,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.MediaType;
 
 import com.dentalclinic.identity.TestTime;
@@ -27,80 +31,138 @@ class AppointmentLifecycleApiTest extends AppointmentIntegrationTestSupport {
 
     private static final AtomicInteger KEYS = new AtomicInteger();
 
-    @Test
-    void trayectoriaLlegadaComienzoYFinalizacionDelProfesionalAsignado() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void completaDirectamenteSinLlegadaInicioNiEscriturasClinicas(boolean hasClinicalData) throws Exception {
         Long id = createAndId(owner, patient.getId(), dentist.getId(),
                 at(MARTES, 9, 0), at(MARTES, 10, 0));
+        if (hasClinicalData) {
+            Long recordId = jdbcTemplate.queryForObject("INSERT INTO clinical_record "
+                    + "(patient_id, allergies) VALUES (?, 'Alergia registrada') RETURNING id",
+                    Long.class, patient.getId());
+            jdbcTemplate.update("INSERT INTO clinical_note "
+                    + "(clinical_record_id, author_dentist_id, content, created_at) "
+                    + "VALUES (?, ?, 'Nota previa', now())", recordId, dentist.getId());
+            jdbcTemplate.update("INSERT INTO treatment "
+                    + "(patient_id, appointment_id, description, status, price, created_at) "
+                    + "VALUES (?, ?, 'Tratamiento previsto', 'PLANNED', 75.1234, now())",
+                    patient.getId(), id);
+            Long toothId = jdbcTemplate.queryForObject("INSERT INTO tooth_record "
+                    + "(patient_id, tooth_fdi, condition, notes, created_at) "
+                    + "VALUES (?, 11, 'CARIES', 'Observación previa', now()) RETURNING id",
+                    Long.class, patient.getId());
+            jdbcTemplate.update("INSERT INTO tooth_history "
+                    + "(tooth_record_id, new_condition, actor_user_id, changed_at) "
+                    + "VALUES (?, 'CARIES', ?, now())", toothId, dentistUser.getId());
+        }
+        List<String> clinicalTables = List.of("clinical_record", "clinical_note", "treatment",
+                "treatment_evolution", "treatment_tooth", "tooth_record", "tooth_history",
+                "tooth_surface_record", "tooth_surface_history");
+        List<List<Map<String, Object>>> before = clinicalTables.stream()
+                .map(table -> jdbcTemplate.queryForList("SELECT * FROM " + table)).toList();
+        var booking = appointmentRepository.findById(id).orElseThrow();
 
-        mockMvc.perform(post("/api/appointments/{id}/arrive", id)
-                        .header("Authorization", bearer(loginToken(dentistUser))))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.eventType").value("PATIENT_ARRIVED"));
-
-        mockMvc.perform(post("/api/appointments/{id}/start", id)
-                        .header("Authorization", bearer(loginToken(dentistUser))))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.eventType").value("APPOINTMENT_STARTED"));
-
-        mockMvc.perform(post("/api/appointments/{id}/complete", id)
+        mockMvc.perform(completeRequest(id)
                         .header("Authorization", bearer(loginToken(dentistUser))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("COMPLETED"))
-                .andExpect(jsonPath("$.completedAt").isNotEmpty());
+                .andExpect(jsonPath("$.completedAt").value(TestTime.now().toString()))
+                .andExpect(jsonPath("$.occurrenceVersion").value(1))
+                .andExpect(jsonPath("$.service.id").value(booking.getServiceId()))
+                .andExpect(jsonPath("$.service.durationMinutes").value(60));
 
         mockMvc.perform(get("/api/appointments/{id}/events", id)
                         .header("Authorization", bearer(loginToken(dentistUser))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].eventType").value("APPOINTMENT_CREATED"))
-                .andExpect(jsonPath("$[1].eventType").value("PATIENT_ARRIVED"))
-                .andExpect(jsonPath("$[2].eventType").value("APPOINTMENT_STARTED"))
-                .andExpect(jsonPath("$[3].eventType").value("APPOINTMENT_COMPLETED"));
+                .andExpect(jsonPath("$.length()").value(3))
+                .andExpect(jsonPath("$[1].eventType").value("APPOINTMENT_COMPLETED"))
+                .andExpect(jsonPath("$[1].actorUserId").value(dentistUser.getId()))
+                .andExpect(jsonPath("$[1].occurrenceVersion").value(1));
 
-        // §14.6: llegada, inicio y completado son solo notificación in-app (sin Communication).
-        assertThat(countRows("communication")).isEqualTo(1);
-        assertThat(countRows("communication_intention")).isEqualTo(3);
-        assertThat(countRows("notification")).isEqualTo(5);
+        // Fase 5C: conserva aviso y añade invitación en outbox, sin escrituras clínicas/financieras.
+        assertThat(countRows("communication")).isEqualTo(2);
+        assertThat(countRows("communication_intention")).isEqualTo(4);
+        assertThat(countRows("notification")).isEqualTo(3);
+        for (int i = 0; i < clinicalTables.size(); i++) {
+            assertThat(jdbcTemplate.queryForList("SELECT * FROM " + clinicalTables.get(i)))
+                    .as(clinicalTables.get(i)).isEqualTo(before.get(i));
+        }
     }
 
     @Test
-    void laLlegadaYElComienzoSoloSeRegistranUnaVez() throws Exception {
+    void lasAccionesRetiradasNoEscribenEventosNiNotificaciones() throws Exception {
         Long id = createAndId(owner, patient.getId(), dentist.getId(),
                 at(MARTES, 9, 0), at(MARTES, 10, 0));
-
-        mockMvc.perform(post("/api/appointments/{id}/arrive", id)
-                        .header("Authorization", bearer(loginToken(dentistUser))))
-                .andExpect(status().isOk());
-        mockMvc.perform(post("/api/appointments/{id}/arrive", id)
-                        .header("Authorization", bearer(loginToken(dentistUser))))
-                .andExpect(status().isConflict());
-
-        mockMvc.perform(post("/api/appointments/{id}/start", id)
-                        .header("Authorization", bearer(loginToken(dentistUser))))
-                .andExpect(status().isOk());
-        mockMvc.perform(post("/api/appointments/{id}/start", id)
-                        .header("Authorization", bearer(loginToken(dentistUser))))
-                .andExpect(status().isConflict());
-
-        assertThat(appointmentEventTypes(id)).containsExactly("APPOINTMENT_CREATED",
-                "PATIENT_ARRIVED", "APPOINTMENT_STARTED");
+        for (String action : List.of("arrive", "start")) {
+            mockMvc.perform(post("/api/appointments/{id}/{action}", id, action)
+                            .header("Authorization", bearer(loginToken(dentistUser))))
+                    .andExpect(status().isNotFound());
+        }
+        assertThat(appointmentEventTypes(id)).containsExactly("APPOINTMENT_CREATED");
+        assertThat(countRows("notification")).isEqualTo(2);
+        assertThat(appointmentRepository.findById(id).orElseThrow().getStatus().name())
+                .isEqualTo("SCHEDULED");
     }
 
     @Test
-    void laTrayectoriaEsSoloDelProfesionalAsignadoODeLaAdministracionAsignada() throws Exception {
+    void conservaYExponeLosEventosHistoricosAlCompletar() throws Exception {
+        Long id = createAndId(owner, patient.getId(), dentist.getId(),
+                at(MARTES, 9, 0), at(MARTES, 10, 0));
+        for (String type : List.of("PATIENT_ARRIVED", "APPOINTMENT_STARTED")) {
+            jdbcTemplate.update("INSERT INTO appointment_event "
+                    + "(appointment_id, event_type, actor_user_id, occurrence_version, metadata) "
+                    + "VALUES (?, ?, ?, 1, '{\"legacy\":true}'::jsonb)", id, type, dentistUser.getId());
+        }
+        var history = jdbcTemplate.queryForList(
+                "SELECT * FROM appointment_event WHERE appointment_id = ? ORDER BY id", id);
+        mockMvc.perform(completeRequest(id)
+                        .header("Authorization", bearer(loginToken(dentistUser))))
+                .andExpect(status().isOk());
+        assertThat(jdbcTemplate.queryForList(
+                "SELECT * FROM appointment_event WHERE appointment_id = ? ORDER BY id", id)
+                .subList(0, history.size())).isEqualTo(history);
+        mockMvc.perform(get("/api/appointments/{id}/events", id)
+                        .header("Authorization", bearer(loginToken(patientUser))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(5))
+                .andExpect(jsonPath("$[1].eventType").value("PATIENT_ARRIVED"))
+                .andExpect(jsonPath("$[1].metadata.legacy").value(true))
+                .andExpect(jsonPath("$[2].eventType").value("APPOINTMENT_STARTED"))
+                .andExpect(jsonPath("$[3].eventType").value("APPOINTMENT_COMPLETED"));
+    }
+
+    /** T4.4 mantiene la política existente: completar no tiene una barrera temporal. */
+    @ParameterizedTest
+    @ValueSource(ints = {-1, 0, 30, 60, 1440})
+    void completarNoDependeDeLaHoraProgramada(int minutesFromStart) throws Exception {
+        Instant start = at(MARTES, 9, 0);
+        Long id = createAndId(owner, patient.getId(), dentist.getId(), start,
+                start.plus(Duration.ofHours(1)));
+        TestTime.advance(Duration.between(TestTime.now(), start.plus(Duration.ofMinutes(minutesFromStart))));
+        mockMvc.perform(completeRequest(id)
+                        .header("Authorization", bearer(loginToken(dentistUser))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("COMPLETED"))
+                .andExpect(jsonPath("$.completedAt").value(TestTime.now().toString()));
+    }
+
+    @Test
+    void completarEsSoloDelProfesionalAsignadoODeLaAdministracionAsignada() throws Exception {
         User otroProfesional = newUser(Role.DENTIST);
         var otroDentist = seedDentistFor(otroProfesional);
         Long id = createAndId(owner, patient.getId(), dentist.getId(),
                 at(MARTES, 9, 0), at(MARTES, 10, 0));
 
-        mockMvc.perform(post("/api/appointments/{id}/arrive", id)
+        mockMvc.perform(completeRequest(id)
                         .header("Authorization", bearer(loginToken(receptionist))))
                 .andExpect(status().isForbidden());
-        mockMvc.perform(post("/api/appointments/{id}/arrive", id)
+        mockMvc.perform(completeRequest(id)
                         .header("Authorization", bearer(loginToken(patientUser))))
                 .andExpect(status().isForbidden());
-        mockMvc.perform(post("/api/appointments/{id}/arrive", id)
+        mockMvc.perform(completeRequest(id)
                         .header("Authorization", bearer(loginToken(otroProfesional))))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isNotFound());
         mockMvc.perform(post("/api/appointments/{id}/complete", id)
                         .header("Authorization", bearer(loginToken(owner))))
                 .andExpect(status().isForbidden())
@@ -162,27 +224,45 @@ class AppointmentLifecycleApiTest extends AppointmentIntegrationTestSupport {
                 .andExpect(status().isConflict());
     }
 
-    @Test
-    void desdeUnEstadoTerminalNoHayTransiciones() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"COMPLETED", "CANCELLED", "NO_SHOW"})
+    void desdeUnEstadoTerminalNoHayTransiciones(String terminal) throws Exception {
         Long id = createAndId(owner, patient.getId(), dentist.getId(),
                 at(MARTES, 9, 0), at(MARTES, 10, 0));
+        TestTime.advance(Duration.between(TestTime.now(), at(MARTES, 9, 0)));
         String token = loginToken(dentistUser);
-
-        mockMvc.perform(post("/api/appointments/{id}/complete", id)
-                        .header("Authorization", bearer(token)))
+        String action = switch (terminal) {
+            case "CANCELLED" -> "cancel";
+            case "NO_SHOW" -> "no-show";
+            default -> "complete";
+        };
+        mockMvc.perform(post("/api/appointments/{id}/{action}", id, action)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"expectedOccurrenceVersion\":1}")
+                        .header("Authorization", bearer(terminal.equals("NO_SHOW") ? loginToken(owner) : token)))
                 .andExpect(status().isOk());
+        var history = appointmentEventTypes(id);
+        long notifications = countRows("notification");
 
         mockMvc.perform(post("/api/appointments/{id}/cancel", id)
                         .header("Authorization", bearer(token)))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.message").value(
-                        "La cita ya no está programada (estado COMPLETED)."));
-        mockMvc.perform(post("/api/appointments/{id}/complete", id)
+                        "La cita ya no está programada (estado " + terminal + ")."));
+        mockMvc.perform(completeRequest(id)
                         .header("Authorization", bearer(token)))
                 .andExpect(status().isConflict());
-        mockMvc.perform(post("/api/appointments/{id}/arrive", id)
+        mockMvc.perform(post("/api/appointments/{id}/reschedule", id)
+                        .header("Authorization", bearer(token))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"startAt\":\"2026-10-14T09:00:00Z\",\"endAt\":\"2026-10-14T10:00:00Z\",\"expectedOccurrenceVersion\":1}"))
+                .andExpect(status().isConflict());
+        mockMvc.perform(post("/api/appointments/{id}/no-show", id)
                         .header("Authorization", bearer(token)))
                 .andExpect(status().isConflict());
+        assertThat(appointmentEventTypes(id)).isEqualTo(history);
+        assertThat(countRows("notification")).isEqualTo(notifications);
+        assertThat(appointmentRepository.findById(id).orElseThrow().getStatus().name()).isEqualTo(terminal);
     }
 
     /** RF-AP: el paciente respeta la antelación de cancelación; la recepción, no. */

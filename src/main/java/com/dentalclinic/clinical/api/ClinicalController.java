@@ -11,9 +11,12 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.RequestParam;
+import com.dentalclinic.clinical.api.dto.ClinicalAppointmentContextResponse;
 
 import com.dentalclinic.clinical.api.dto.ClinicalNoteResponse;
 import com.dentalclinic.clinical.api.dto.ClinicalRecordResponse;
+import com.dentalclinic.clinical.api.dto.CreateClinicalNoteCorrectionRequest;
 import com.dentalclinic.clinical.api.dto.CreateClinicalNoteRequest;
 import com.dentalclinic.clinical.api.dto.SaveClinicalRecordRequest;
 import com.dentalclinic.clinical.application.ClinicalService;
@@ -28,7 +31,7 @@ import jakarta.validation.Valid;
 /**
  * Expediente clinico de un paciente (matriz §7.4, grupo {@code /api/patients/{id}/clinical}).
  *
- * <p>OWNER lee; DENTIST lee y escribe; RECEPTIONIST y PATIENT no tienen acceso (RF-CX-06/07). Los
+ * <p>OWNER y DENTIST leen y escriben; RECEPTIONIST y PATIENT no tienen acceso (RF-CX-06/07). Los
  * permisos los aplica {@code EndpointAccessFilter}. Las notas son inmutables (RF-CX-04): no hay
  * {@code PUT}/{@code PATCH}/{@code DELETE} sobre ellas.
  */
@@ -56,8 +59,9 @@ public class ClinicalController {
     }
 
     @GetMapping("/notes")
-    public List<ClinicalNoteResponse> listNotes(@PathVariable("id") Long patientId) {
-        return clinicalService.listNotes(patientId).stream().map(ClinicalController::toDto).toList();
+    public List<ClinicalNoteResponse> listNotes(@PathVariable("id") Long patientId,
+                                              @RequestParam(defaultValue = "false") boolean generalOnly) {
+        return clinicalService.listNotes(patientId, generalOnly).stream().map(ClinicalController::toDto).toList();
     }
 
     @PostMapping("/notes")
@@ -65,7 +69,22 @@ public class ClinicalController {
     public ClinicalNoteResponse addNote(@PathVariable("id") Long patientId,
                                         @Valid @RequestBody CreateClinicalNoteRequest request) {
         AuthenticatedUser principal = CurrentUser.require();
-        return toDto(clinicalService.addNote(patientId, principal.userId(), request.content()));
+        return toDto(clinicalService.addNote(patientId, principal, request.content(),
+                request.appointmentContext() == null ? null : request.appointmentContext().toSelection()));
+    }
+
+    /**
+     * Corrige una nota conservando la original (append-only). Cualquier OWNER/DENTIST del grupo
+     * clinico puede corregir; no se exige ser el autor ni se amplia la matriz de permisos.
+     */
+    @PostMapping("/notes/{noteId}/corrections")
+    @ResponseStatus(HttpStatus.CREATED)
+    public ClinicalNoteResponse correctNote(@PathVariable("id") Long patientId,
+                                            @PathVariable Long noteId,
+                                            @Valid @RequestBody CreateClinicalNoteCorrectionRequest request) {
+        AuthenticatedUser principal = CurrentUser.require();
+        return toDto(clinicalService.correct(patientId, noteId, principal, request.content(),
+                request.correctionReason()));
     }
 
     private static ClinicalRecordResponse toDto(ClinicalRecordView view) {
@@ -73,8 +92,9 @@ public class ClinicalController {
                 view.clinicalHistory(), view.generalObservations(), view.updatedAt());
     }
 
-    private static ClinicalNoteResponse toDto(ClinicalNoteView view) {
+    public static ClinicalNoteResponse toDto(ClinicalNoteView view) {
         return new ClinicalNoteResponse(view.id(), view.content(), view.authorDentistId(),
-                view.authorName(), view.createdAt());
+                view.authorName(), view.createdAt(), ClinicalAppointmentContextResponse.from(view.appointmentContext()),
+                view.correctsRecordId(), view.correctionReason());
     }
 }

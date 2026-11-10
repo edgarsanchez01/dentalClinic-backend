@@ -5,6 +5,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,6 +14,7 @@ import com.dentalclinic.clinic.application.ClinicService;
 import com.dentalclinic.clinic.domain.Clinic;
 import com.dentalclinic.clinic.domain.Dentist;
 import com.dentalclinic.clinic.infrastructure.repository.DentistRepository;
+import com.dentalclinic.identity.application.UserService;
 import com.dentalclinic.scheduling.api.dto.PublicDayView;
 import com.dentalclinic.scheduling.api.dto.PublicDentistView;
 import com.dentalclinic.scheduling.api.dto.PublicExceptionView;
@@ -27,6 +29,11 @@ import com.dentalclinic.scheduling.infrastructure.repository.DentistScheduleRepo
 /**
  * Horario público (RF-SC-08). Expone solo ventanas semanales y excepciones de la clínica
  * <strong>sin motivo</strong>. Nunca breaks, franquicias, motivos de dentista ni datos privados.
+ *
+ * <p><strong>Directorio solo de profesionales activos (H-A15):</strong> un {@code Dentist} cuyo
+ * {@code User.active} es falso (cuenta jubilada o pendiente de activar) NO aparece en el directorio
+ * público ni, por tanto, como reservable. La creación de citas ya rechaza a los inactivos
+ * ({@code AppointmentService}); esto alinea la superficie de descubrimiento con esa regla.
  */
 @Service
 public class PublicScheduleService {
@@ -36,16 +43,18 @@ public class PublicScheduleService {
     private final ClinicScheduleRepository clinicScheduleRepository;
     private final ClinicScheduleExceptionRepository clinicExceptionRepository;
     private final DentistScheduleRepository dentistScheduleRepository;
+    private final UserService userService;
 
     public PublicScheduleService(ClinicService clinicService, DentistRepository dentistRepository,
             ClinicScheduleRepository clinicScheduleRepository,
             ClinicScheduleExceptionRepository clinicExceptionRepository,
-            DentistScheduleRepository dentistScheduleRepository) {
+            DentistScheduleRepository dentistScheduleRepository, UserService userService) {
         this.clinicService = clinicService;
         this.dentistRepository = dentistRepository;
         this.clinicScheduleRepository = clinicScheduleRepository;
         this.clinicExceptionRepository = clinicExceptionRepository;
         this.dentistScheduleRepository = dentistScheduleRepository;
+        this.userService = userService;
     }
 
     @Transactional(readOnly = true)
@@ -67,6 +76,9 @@ public class PublicScheduleService {
         }
 
         List<Dentist> dentists = new ArrayList<>(dentistRepository.findAll());
+        Set<Long> activeUserIds = userService
+                .activeUserIds(dentists.stream().map(Dentist::getUserId).toList());
+        dentists.removeIf(dentist -> !activeUserIds.contains(dentist.getUserId()));
         dentists.sort(Comparator.comparing(Dentist::getLastName).thenComparing(Dentist::getFirstName));
         List<PublicDentistView> dentistViews = new ArrayList<>();
         for (Dentist dentist : dentists) {

@@ -16,6 +16,13 @@ import com.dentalclinic.clinic.infrastructure.repository.ClinicRepository;
 import com.dentalclinic.clinic.infrastructure.repository.DentistRepository;
 import com.dentalclinic.clinical.infrastructure.repository.ClinicalNoteRepository;
 import com.dentalclinic.clinical.infrastructure.repository.ClinicalRecordRepository;
+import com.dentalclinic.clinical.infrastructure.repository.TreatmentEvolutionRepository;
+import com.dentalclinic.clinical.infrastructure.repository.TreatmentRepository;
+import com.dentalclinic.odontogram.infrastructure.repository.ToothHistoryRepository;
+import com.dentalclinic.odontogram.infrastructure.repository.ToothRecordRepository;
+import com.dentalclinic.odontogram.infrastructure.repository.ToothSurfaceHistoryRepository;
+import com.dentalclinic.odontogram.infrastructure.repository.ToothSurfaceRecordRepository;
+import com.dentalclinic.odontogram.infrastructure.repository.TreatmentToothRepository;
 import com.dentalclinic.patient.infrastructure.repository.PatientRepository;
 import com.dentalclinic.scheduling.infrastructure.repository.ClinicBreakRepository;
 import com.dentalclinic.scheduling.infrastructure.repository.ClinicScheduleExceptionRepository;
@@ -80,6 +87,26 @@ public abstract class IdentityIntegrationTestSupport {
     private DentistRepository dentistRepository;
     @Autowired
     private ClinicRepository clinicRepository;
+    @Autowired
+    private TreatmentRepository treatmentRepository;
+    @Autowired
+    private TreatmentEvolutionRepository treatmentEvolutionRepository;
+    @Autowired
+    private ToothHistoryRepository toothHistoryRepository;
+    @Autowired
+    private ToothSurfaceHistoryRepository toothSurfaceHistoryRepository;
+    @Autowired
+    private ToothSurfaceRecordRepository toothSurfaceRecordRepository;
+    @Autowired
+    private TreatmentToothRepository treatmentToothRepository;
+    @Autowired
+    private ToothRecordRepository toothRecordRepository;
+
+    @Autowired
+    private com.dentalclinic.appointment.infrastructure.repository.AppointmentOccurrenceSnapshotRepository occurrenceSnapshots;
+
+    @Autowired private org.springframework.jdbc.core.JdbcTemplate cleanupJdbc;
+    @Autowired private org.springframework.core.env.Environment testEnvironment;
 
     /**
      * Limpia antes de cada test las tablas que referencian a {@code patient}, {@code dentist} o
@@ -89,6 +116,30 @@ public abstract class IdentityIntegrationTestSupport {
      */
     @BeforeEach
     void cleanSharedDependentTables() {
+        // Guard before fixture writes: never use a datasource configured for an operator's database.
+        org.assertj.core.api.Assertions.assertThat(testEnvironment.getProperty("spring.datasource.url"))
+                .startsWith("jdbc:tc:postgresql:");
+        cleanupJdbc.update("DELETE FROM patient_intake_declaration");
+        cleanupJdbc.update("DELETE FROM patient_intake_privacy");
+        cleanupJdbc.update("DELETE FROM patient_intake_draft");
+        cleanupJdbc.update("DELETE FROM tooth_surface_notes_history");
+        cleanupJdbc.update("DELETE FROM patient_feedback");
+        // Outbox de identidad (F8B.2): referencia a users, se limpia antes de cualquier borrado de
+        // usuarios heredado para no violar la FK restrictiva.
+        cleanupJdbc.update("DELETE FROM identity_email_outbox");
+        cleanupJdbc.update("DELETE FROM tooth_notes_history");
+        cleanupJdbc.update("DELETE FROM tooth_treatment_history");
+        toothSurfaceHistoryRepository.deleteAll();
+        toothSurfaceRecordRepository.deleteAll();
+        toothHistoryRepository.deleteAll();
+        treatmentToothRepository.deleteAll();
+        toothRecordRepository.deleteAll();
+        treatmentEvolutionRepository.deleteCorrections();
+        treatmentEvolutionRepository.deleteAll();
+        treatmentRepository.deleteAll();
+        clinicalNoteRepository.deleteCorrections();
+        clinicalNoteRepository.deleteAll();
+        occurrenceSnapshots.deleteAll();
         communicationIntentionRepository.deleteAll();
         notificationRepository.deleteAll();
         communicationRepository.deleteAll();

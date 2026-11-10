@@ -5,6 +5,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.cookie;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,6 +47,9 @@ class RegisterApiIntegrationTest extends IdentityIntegrationTestSupport {
     private PasswordResetTokenRepository resetTokenRepository;
     @Autowired
     private RefreshSessionRepository refreshSessionRepository;
+    @Autowired private org.springframework.jdbc.core.JdbcTemplate jdbc;
+    @Autowired private com.fasterxml.jackson.databind.ObjectMapper mapper;
+    @Autowired private org.springframework.security.crypto.password.PasswordEncoder passwords;
 
     @BeforeEach
     void cleanSlate() {
@@ -61,16 +66,26 @@ class RegisterApiIntegrationTest extends IdentityIntegrationTestSupport {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body("ana@c.com", PASSWORD, "Ana", "Perez", "+34 600 111 222", "1990-05-01")))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.id").isNumber())
-                .andExpect(jsonPath("$.email").value("ana@c.com"))
-                .andExpect(jsonPath("$.role").value("PATIENT"))
-                .andExpect(jsonPath("$.active").value(true))
-                .andExpect(jsonPath("$.patientId").isNumber())
-                .andExpect(jsonPath("$.passwordHash").doesNotExist());
+                .andExpect(jsonPath("$.user.id").isNumber())
+                .andExpect(jsonPath("$.user.email").value("ana@c.com"))
+                .andExpect(jsonPath("$.user.role").value("PATIENT"))
+                .andExpect(jsonPath("$.user.active").value(true))
+                .andExpect(jsonPath("$.accessToken").isNotEmpty())
+                .andExpect(jsonPath("$.tokenType").value("Bearer"))
+                .andExpect(jsonPath("$.user.passwordHash").doesNotExist())
+                .andExpect(jsonPath("$.refreshToken").doesNotExist())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(cookie().httpOnly("dentalclinic_refresh", true))
+                .andExpect(cookie().path("dentalclinic_refresh", "/api/auth"))
+                .andExpect(cookie().attribute("dentalclinic_refresh", "SameSite", "Lax"))
+                .andExpect(cookie().maxAge("dentalclinic_refresh", 2592000))
+                .andExpect(cookie().exists("XSRF-TOKEN"));
 
         var user = userRepository.findByEmail("ana@c.com").orElseThrow();
         assertThat(user.getRole()).isEqualTo(Role.PATIENT);
         assertThat(user.isActive()).isTrue();
+        assertThat(passwords.matches(PASSWORD, user.getPasswordHash())).isTrue();
+        assertThat(refreshSessionRepository.count()).isEqualTo(1);
 
         var patient = patientRepository.findByUserId(user.getId()).orElseThrow();
         assertThat(patient.getFirstName()).isEqualTo("Ana");
@@ -89,7 +104,7 @@ class RegisterApiIntegrationTest extends IdentityIntegrationTestSupport {
                                  "role":"OWNER"}
                                 """.formatted(PASSWORD)))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.role").value("PATIENT"));
+                .andExpect(jsonPath("$.user.role").value("PATIENT"));
         assertThat(userRepository.findByEmail("jefa@c.com").orElseThrow().getRole()).isEqualTo(Role.PATIENT);
     }
 
@@ -103,7 +118,11 @@ class RegisterApiIntegrationTest extends IdentityIntegrationTestSupport {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body("dup@c.com", PASSWORD, "A", "B", null, null)))
                 .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.status").value(409));
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(cookie().doesNotExist("dentalclinic_refresh"));
+        assertThat(userRepository.count()).isEqualTo(1);
+        assertThat(patientRepository.count()).isEqualTo(1);
+        assertThat(refreshSessionRepository.count()).isEqualTo(1);
     }
 
     @Test
@@ -137,23 +156,81 @@ class RegisterApiIntegrationTest extends IdentityIntegrationTestSupport {
                         .content(body("me@c.com", PASSWORD, "Me", "Same", null, null)))
                 .andExpect(status().isCreated())
                 .andReturn();
-        long patientId = new com.fasterxml.jackson.databind.ObjectMapper()
-                .readTree(registered.getResponse().getContentAsString()).get("patientId").asLong();
-
-        MvcResult login = mockMvc.perform(post("/api/auth/login")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {"email":"me@c.com","password":"%s"}
-                                """.formatted(PASSWORD)))
-                .andExpect(status().isOk())
-                .andReturn();
-        String accessToken = new com.fasterxml.jackson.databind.ObjectMapper()
-                .readTree(login.getResponse().getContentAsString()).get("accessToken").asText();
+        var payload = mapper.readTree(registered.getResponse().getContentAsString());
+        long patientId = patientRepository.findByUserId(payload.at("/user/id").asLong()).orElseThrow().getId();
+        String accessToken = payload.get("accessToken").asText();
 
         mockMvc.perform(get("/api/auth/me").header("Authorization", "Bearer " + accessToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.role").value("PATIENT"))
-                .andExpect(jsonPath("$.patientId").value(patientId));
+                .andExpect(jsonPath("$.patientId").value(patientId))
+                .andExpect(jsonPath("$.medicalOnboarding.pending").value(true));
+    }
+
+    @Test
+    void registroRenuevaConCsrfLogoutRevocaYLoginPosteriorFunciona() throws Exception {
+        var registration = register("session@dc.test");
+        var refresh = registration.getResponse().getCookie("dentalclinic_refresh");
+        var xsrf = registration.getResponse().getCookie("XSRF-TOKEN");
+        var stored = refreshSessionRepository.findAll().getFirst();
+        assertThat(stored.getTokenHash()).isNotEqualTo(refresh.getValue()).hasSize(64);
+        TestTime.advance(java.time.Duration.ofMinutes(16));
+        mockMvc.perform(get("/api/auth/me").header("Authorization", "Bearer " + token(registration)))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/auth/refresh").cookie(refresh)).andExpect(status().isForbidden());
+        var rotated = mockMvc.perform(post("/api/auth/refresh").cookie(refresh, xsrf).header("X-XSRF-TOKEN", xsrf.getValue()))
+                .andExpect(status().isOk()).andExpect(cookie().exists("dentalclinic_refresh")).andReturn();
+        var next = rotated.getResponse().getCookie("dentalclinic_refresh");
+        assertThat(next.getValue()).isNotEqualTo(refresh.getValue());
+        mockMvc.perform(get("/api/auth/me").header("Authorization", "Bearer " + token(rotated)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.medicalOnboarding.pending").value(true));
+        mockMvc.perform(post("/api/auth/logout").cookie(next, xsrf).header("X-XSRF-TOKEN", xsrf.getValue()))
+                .andExpect(status().isNoContent()).andExpect(cookie().maxAge("dentalclinic_refresh", 0));
+        mockMvc.perform(post("/api/auth/refresh").cookie(next, xsrf).header("X-XSRF-TOKEN", xsrf.getValue()))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"email\":\"session@dc.test\",\"password\":\"" + PASSWORD + "\"}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.accessToken").isNotEmpty());
+    }
+
+    @Test
+    void refreshDeRegistroExpiradoNoEmiteCredenciales() throws Exception {
+        var registration = register("expired@dc.test");
+        var xsrf = registration.getResponse().getCookie("XSRF-TOKEN");
+        TestTime.advance(java.time.Duration.ofDays(31));
+        mockMvc.perform(post("/api/auth/refresh").cookie(registration.getResponse().getCookie("dentalclinic_refresh"), xsrf)
+                .header("X-XSRF-TOKEN", xsrf.getValue())).andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.accessToken").doesNotExist())
+                .andExpect(cookie().doesNotExist("dentalclinic_refresh"));
+        assertThat(refreshSessionRepository.count()).isEqualTo(1);
+    }
+
+    @Test
+    void falloAlCrearSesionRevierteCuentaYPacienteSinCookie() throws Exception {
+        // Falla DESPUÉS de los inserts de User/Patient, solo en el PostgreSQL efímero del test.
+        jdbc.execute("CREATE FUNCTION reject_registration_session() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic session failure'; END $$");
+        jdbc.execute("CREATE TRIGGER reject_registration_session BEFORE INSERT ON refresh_sessions FOR EACH ROW EXECUTE FUNCTION reject_registration_session()");
+        try {
+            mockMvc.perform(post("/api/auth/register").contentType(MediaType.APPLICATION_JSON)
+                    .content(body("rollback@dc.test", PASSWORD, "Ficticio", "Rollback", null, null)))
+                    .andExpect(status().is5xxServerError()).andExpect(cookie().doesNotExist("dentalclinic_refresh"));
+            assertThat(userRepository.count()).isZero();
+            assertThat(patientRepository.count()).isZero();
+            assertThat(refreshSessionRepository.count()).isZero();
+        } finally {
+            jdbc.execute("DROP TRIGGER reject_registration_session ON refresh_sessions");
+            jdbc.execute("DROP FUNCTION reject_registration_session()");
+        }
+    }
+
+    private MvcResult register(String email) throws Exception {
+        return mockMvc.perform(post("/api/auth/register").contentType(MediaType.APPLICATION_JSON)
+                .content(body(email, PASSWORD, "Ficticio", "Sesion", null, null)))
+                .andExpect(status().isCreated()).andReturn();
+    }
+
+    private String token(MvcResult result) throws Exception {
+        return mapper.readTree(result.getResponse().getContentAsString()).get("accessToken").asText();
     }
 
     private static String body(String email, String password, String firstName, String lastName,

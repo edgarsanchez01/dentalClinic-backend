@@ -379,6 +379,25 @@ class SchedulingApiIntegrationTest extends IdentityIntegrationTestSupport {
                 .andExpect(content().string(not(containsString("reason"))));
     }
 
+    // ===== Profesionales activos (H-A15) =====
+
+    @Test
+    void directorioPublicoExcluyeProfesionalesInactivos() throws Exception {
+        seedClinic("UTC");
+        User activo = seedUser("activo@c.com", Role.DENTIST);
+        seedDentist(activo, "Activo", "Uno");
+        User inactivo = seedUser("inactivo@c.com", Role.DENTIST);
+        seedDentist(inactivo, "Inactivo", "Dos");
+        inactivo.deactivate();
+        userRepository.saveAndFlush(inactivo);
+
+        mockMvc.perform(get("/api/public/schedule"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.dentists", hasSize(1)))
+                .andExpect(jsonPath("$.dentists[0].firstName").value("Activo"))
+                .andExpect(content().string(not(containsString("Inactivo"))));
+    }
+
     // ===== Superficie pública: mínimo privilegio =====
 
     @Test

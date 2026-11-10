@@ -28,7 +28,8 @@ public record AppointmentResponse(
         String notes,
         Instant completedAt,
         Instant createdAt,
-        Instant updatedAt) {
+        Instant updatedAt,
+        AppointmentServiceSnapshot service) {
 
     /** PRD §11.5: las notas internas nunca forman parte de la respuesta PATIENT. */
     public AppointmentResponse forRole(Role role) {
@@ -37,7 +38,7 @@ public record AppointmentResponse(
             case PATIENT -> new AppointmentResponse(id, patientId, patientFirstName,
                     patientLastName, patientUserId, dentistId, dentistFirstName, dentistLastName,
                     startAt, endAt, durationMinutes, status, occurrenceVersion, createdByUserId,
-                    reason, null, completedAt, createdAt, updatedAt);
+                    reason, null, completedAt, createdAt, updatedAt, service);
         };
     }
 }

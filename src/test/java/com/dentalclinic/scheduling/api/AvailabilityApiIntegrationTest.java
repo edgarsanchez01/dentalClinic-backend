@@ -190,6 +190,24 @@ class AvailabilityApiIntegrationTest extends IdentityIntegrationTestSupport {
                 .andExpect(jsonPath("$.slots", hasSize(0)));
     }
 
+    /**
+     * H-A15: un profesional con la cuenta desactivada no ofrece disponibilidad para una reserva
+     * nueva (404), en coherencia con {@code AppointmentService}, que rechaza crear citas con él.
+     */
+    @Test
+    void unProfesionalInactivoNoOfreceDisponibilidad() throws Exception {
+        Fixture f = fixture("UTC");
+        User dentistUser = userRepository.findByEmail("dentist@c.com").orElseThrow();
+        dentistUser.deactivate();
+        userRepository.saveAndFlush(dentistUser);
+        String token = loginToken(seedUser("own@c.com", Role.OWNER));
+
+        mockMvc.perform(get("/api/availability").param("dentistId", f.dentistId().toString())
+                        .param("from", TUESDAY.toString()).param("duration", "30")
+                        .header("Authorization", bearer(token)))
+                .andExpect(status().isNotFound());
+    }
+
     @Test
     void politicaDstConservadoraEnMadrid() throws Exception {
         Fixture f = fixture("Europe/Madrid");

@@ -10,6 +10,8 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 
 /**
  * Paciente: perfil <strong>administrativo</strong> (Architecture.md §15.3, Fase 4).
@@ -62,6 +64,31 @@ public class Patient {
 
     @Column(name = "birth_date")
     private LocalDate birthDate;
+
+    @Column(name = "can_provide_phone")
+    private Boolean canProvidePhone;
+    @Column(name = "emergency_contact_name", length = 200)
+    private String emergencyContactName;
+    @Column(name = "emergency_contact_relationship", length = 100)
+    private String emergencyContactRelationship;
+    @Column(name = "emergency_contact_phone", length = 50)
+    private String emergencyContactPhone;
+    @Column(name = "responsible_adult_name", length = 200)
+    private String responsibleAdultName;
+    @Enumerated(EnumType.STRING)
+    @Column(name = "responsible_adult_relationship", length = 20)
+    private IntakePersonalData.ResponsibleRelationship responsibleAdultRelationship;
+    @Column(name = "responsible_adult_phone", length = 50)
+    private String responsibleAdultPhone;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "medical_onboarding_requirement", nullable = false, length = 20)
+    private MedicalOnboardingRequirement medicalOnboardingRequirement = MedicalOnboardingRequirement.EXEMPT_EXISTING;
+    @Enumerated(EnumType.STRING)
+    @Column(name = "medical_onboarding_progress", nullable = false, length = 20)
+    private MedicalOnboardingProgress medicalOnboardingProgress = MedicalOnboardingProgress.NOT_STARTED;
+    @Column(name = "intake_version", nullable = false)
+    private long intakeVersion;
 
     @Column(name = "administrative_notes")
     private String administrativeNotes;
@@ -124,6 +151,48 @@ public class Patient {
             this.active = active;
         }
         this.updatedAt = now;
+        this.intakeVersion++;
+    }
+
+    public void requireMedicalOnboarding() {
+        medicalOnboardingRequirement = MedicalOnboardingRequirement.REQUIRED;
+    }
+
+    public void saveIntakePersonal(IntakePersonalData data, Instant now) {
+        firstName = data.firstName();
+        lastName = data.lastName();
+        birthDate = data.birthDate();
+        phone = data.phone();
+        canProvidePhone = data.canProvidePhone();
+        emergencyContactName = data.emergencyContactName();
+        emergencyContactRelationship = data.emergencyContactRelationship();
+        emergencyContactPhone = data.emergencyContactPhone();
+        responsibleAdultName = data.responsibleAdultName();
+        responsibleAdultRelationship = data.responsibleAdultRelationship();
+        responsibleAdultPhone = data.responsibleAdultPhone();
+        advanceIntake(false, now);
+    }
+
+    public IntakePersonalData intakePersonal() {
+        return new IntakePersonalData(firstName, lastName, birthDate, phone, canProvidePhone,
+                emergencyContactName, emergencyContactRelationship, emergencyContactPhone,
+                responsibleAdultName, responsibleAdultRelationship, responsibleAdultPhone);
+    }
+
+    public void advanceIntake(boolean completed, Instant now) {
+        if (completed) medicalOnboardingProgress = MedicalOnboardingProgress.COMPLETED;
+        else if (medicalOnboardingProgress == MedicalOnboardingProgress.NOT_STARTED)
+            medicalOnboardingProgress = MedicalOnboardingProgress.IN_PROGRESS;
+        intakeVersion++;
+        updatedAt = now;
+    }
+
+    public MedicalOnboardingRequirement getMedicalOnboardingRequirement() { return medicalOnboardingRequirement; }
+    public MedicalOnboardingProgress getMedicalOnboardingProgress() { return medicalOnboardingProgress; }
+    public long getIntakeVersion() { return intakeVersion; }
+    public boolean isMedicalOnboardingPending() {
+        return medicalOnboardingRequirement == MedicalOnboardingRequirement.REQUIRED
+                && medicalOnboardingProgress != MedicalOnboardingProgress.COMPLETED;
     }
 
     public Long getId() {

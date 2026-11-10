@@ -33,11 +33,17 @@ public class AvailabilityController {
 
     private final AvailabilityService availabilityService;
     private final BookingPolicyService bookingPolicyService;
+    private final com.dentalclinic.catalog.application.ServiceCatalogService catalog;
+    private final com.dentalclinic.appointment.application.AppointmentService appointments;
 
     public AvailabilityController(AvailabilityService availabilityService,
-            BookingPolicyService bookingPolicyService) {
+            BookingPolicyService bookingPolicyService,
+            com.dentalclinic.catalog.application.ServiceCatalogService catalog,
+            com.dentalclinic.appointment.application.AppointmentService appointments) {
         this.availabilityService = availabilityService;
         this.bookingPolicyService = bookingPolicyService;
+        this.catalog = catalog;
+        this.appointments = appointments;
     }
 
     @GetMapping
@@ -46,8 +52,26 @@ public class AvailabilityController {
             @RequestParam("from") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
             @RequestParam(name = "to", required = false)
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
-            @RequestParam("duration") int duration) {
-        return availabilityService.compute(dentistId, from, to, duration);
+            @RequestParam(name = "duration", required = false) Integer duration,
+            @RequestParam(name = "serviceId", required = false) Long serviceId,
+            @RequestParam(name = "appointmentId", required = false) Long appointmentId) {
+        if (serviceId != null && appointmentId != null) {
+            throw new com.dentalclinic.scheduling.domain.exception.InvalidScheduleException("Consulta por servicio o por cita, no ambos.");
+        }
+        int resolvedDuration;
+        if (appointmentId != null) {
+            var appointment = appointments.get(appointmentId, com.dentalclinic.identity.infrastructure.security.CurrentUser.require());
+            if (!appointment.getDentistId().equals(dentistId)) {
+                throw new com.dentalclinic.scheduling.domain.exception.InvalidScheduleException("El profesional debe ser el de la cita.");
+            }
+            resolvedDuration = appointment.getDurationMinutes();
+        } else if (serviceId != null) resolvedDuration = catalog.resolveActive(serviceId).durationMinutes();
+        else if (duration != null) resolvedDuration = duration;
+        else throw new com.dentalclinic.scheduling.domain.exception.InvalidScheduleException("Selecciona un servicio o consulta una cita existente.");
+        // Reconsultar la disponibilidad de una cita existente sigue mostrando huecos aunque el
+        // profesional se haya desactivado (el backend acepta reprogramarla); para reservas nuevas,
+        // un profesional inactivo no se ofrece (H-A15).
+        return availabilityService.compute(dentistId, from, to, resolvedDuration, appointmentId != null);
     }
 
     @GetMapping("/policy")

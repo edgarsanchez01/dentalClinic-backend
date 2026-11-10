@@ -37,8 +37,9 @@ import com.dentalclinic.patient.infrastructure.repository.PatientRepository;
 /**
  * Contrato HTTP del expediente clinico (matriz §7.4, grupo {@code /api/patients/{id}/clinical}).
  *
- * <p>DENTIST lee y escribe; OWNER solo lee; RECEPTIONIST y PATIENT no tienen acceso. Las notas son
- * inmutables (RF-CX-04): no existen rutas de edicion ni borrado.
+ * <p>OWNER y DENTIST leen y escriben (el OWNER siempre tiene perfil de dentista, AD-11);
+ * RECEPTIONIST y PATIENT no tienen acceso. Las notas son inmutables (RF-CX-04): no existen rutas
+ * de edicion ni borrado.
  */
 @AutoConfigureMockMvc
 class ClinicalApiIntegrationTest extends IdentityIntegrationTestSupport {
@@ -114,8 +115,8 @@ class ClinicalApiIntegrationTest extends IdentityIntegrationTestSupport {
     }
 
     @Test
-    void owner_leePeroNoEscribe() throws Exception {
-        String token = loginToken(seedUser("own@c.com", Role.OWNER));
+    void owner_leeYEsEscribeComoPersonalClinico() throws Exception {
+        String token = ownerToken("own@c.com");
         Long patientId = patientRepository.saveAndFlush(Patient.create("Cli", "Ente", null, null,
                 null, null)).getId();
 
@@ -124,15 +125,21 @@ class ClinicalApiIntegrationTest extends IdentityIntegrationTestSupport {
         mockMvc.perform(put(clinical(patientId)).header("Authorization", bearer(token))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"allergies":"X"}
+                                {"allergies":"Penicilina","clinicalHistory":"Sin cirugias"}
                                 """))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.allergies").value("Penicilina"));
         mockMvc.perform(post(clinical(patientId) + "/notes").header("Authorization", bearer(token))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"content":"No deberia"}
+                                {"content":"Nota escrita por el OWNER."}
                                 """))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.content").value("Nota escrita por el OWNER."))
+                .andExpect(jsonPath("$.authorName").value("Olivia Owner"))
+                .andExpect(jsonPath("$.authorDentistId").isNumber());
+
+        assertThat(clinicalNoteRepository.count()).isEqualTo(1);
     }
 
     @Test
@@ -222,6 +229,13 @@ class ClinicalApiIntegrationTest extends IdentityIntegrationTestSupport {
         User user = seedUser(email, Role.DENTIST);
         dentistService.createForUser(user.getId(), new DentistData("Dora", "Dentista", "600",
                 "Ortodoncia", "LIC-1", null, null));
+        return loginToken(user);
+    }
+
+    private String ownerToken(String email) throws Exception {
+        User user = seedUser(email, Role.OWNER);
+        dentistService.createForUser(user.getId(), new DentistData("Olivia", "Owner", "601",
+                "General", "LIC-OWN", null, null));
         return loginToken(user);
     }
 

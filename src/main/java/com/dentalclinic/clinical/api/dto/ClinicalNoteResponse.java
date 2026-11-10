@@ -8,5 +8,8 @@ public record ClinicalNoteResponse(
         String content,
         Long authorDentistId,
         String authorName,
-        Instant createdAt) {
+        Instant createdAt,
+        ClinicalAppointmentContextResponse appointmentContext,
+        Long correctsRecordId,
+        String correctionReason) {
 }

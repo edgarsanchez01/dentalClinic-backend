@@ -272,6 +272,32 @@ class AppointmentCreateApiTest extends AppointmentIntegrationTestSupport {
         assertThat(countRows("appointment")).isZero();
     }
 
+    /**
+     * H-A15: un profesional desactivado no admite citas nuevas (409), pero las citas existentes
+     * siguen legibles con el nombre del odontólogo: los datos históricos se conservan.
+     */
+    @Test
+    void profesionalInactivoRechazaNuevasPeroConservaLasCitashistoricas() throws Exception {
+        createOwner(at(MARTES, 9, 0), at(MARTES, 10, 0)).andExpect(status().isCreated());
+        Long historica = appointmentRepository.findAll().get(0).getId();
+
+        dentistUser.deactivate();
+        userRepository.saveAndFlush(dentistUser);
+
+        createOwner(at(MARTES, 11, 0), at(MARTES, 12, 0))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value(
+                        "El profesional indicado no está disponible en este momento."));
+        assertThat(countRows("appointment")).isEqualTo(1);
+
+        // La cita histórica sigue disponible con el perfil del profesional desactivado.
+        mockMvc.perform(get("/api/appointments/{id}", historica)
+                        .header("Authorization", bearer(loginToken(owner))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.dentistId").value(dentist.getId()))
+                .andExpect(jsonPath("$.dentistLastName").value("Perfil"));
+    }
+
     /** A-17/§17: la ventana horaria se evalúa en la zona horaria de la clínica, no en UTC. */
     @Test
     void laVentanaHorariaSeEvaluaEnLaZonaDeLaClinica() throws Exception {

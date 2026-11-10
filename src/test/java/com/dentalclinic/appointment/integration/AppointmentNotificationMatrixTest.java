@@ -96,28 +96,22 @@ class AppointmentNotificationMatrixTest extends AppointmentIntegrationTestSuppor
                 String.class, id)).containsExactly("NO_CONTACT_CHANNEL");
     }
 
-    /** §14.2/§14.6: llegada, inicio y completado son solo notificación; no abren outbox. */
+    /** 5C: completar conserva el aviso y añade una solicitud EMAIL de feedback. */
     @Test
     void losEventosDeSoloNotificacionNoGeneranCommunication() throws Exception {
         Long id = createAndId(owner, patient.getId(), dentist.getId(),
                 at(MARTES, 9, 0), at(MARTES, 10, 0));
 
-        mockMvc.perform(post("/api/appointments/{id}/arrive", id)
-                        .header("Authorization", bearer(loginToken(dentistUser))))
-                .andExpect(status().isOk());
-        mockMvc.perform(post("/api/appointments/{id}/start", id)
-                        .header("Authorization", bearer(loginToken(dentistUser))))
-                .andExpect(status().isOk());
-        mockMvc.perform(post("/api/appointments/{id}/complete", id)
+        mockMvc.perform(completeRequest(id)
                         .header("Authorization", bearer(loginToken(dentistUser))))
                 .andExpect(status().isOk());
 
-        assertThat(countRows("communication")).isEqualTo(1);
-        assertThat(countRows("communication_intention")).isEqualTo(3);
-        assertThat(countRows("notification")).isEqualTo(5);
+        assertThat(countRows("communication")).isEqualTo(2);
+        assertThat(countRows("communication_intention")).isEqualTo(4);
+        assertThat(countRows("notification")).isEqualTo(3);
         assertThat(jdbcTemplate.queryForList(
                 "SELECT appointment_id FROM notification WHERE appointment_id = ?", Long.class, id))
-                .hasSize(5);
+                .hasSize(3);
     }
 
     @Test
